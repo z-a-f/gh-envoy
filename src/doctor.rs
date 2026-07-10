@@ -284,7 +284,7 @@ pub fn redact_doctor_paths(report: &DoctorReport) -> DoctorReport {
             collect_absolute_paths(evidence, &mut replacements);
         }
     }
-    replacements.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    replacements.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
     replacements.dedup_by(|left, right| left.0 == right.0);
     for check in &mut redacted.checks {
         check.message = redact_text(&check.message, &replacements);
