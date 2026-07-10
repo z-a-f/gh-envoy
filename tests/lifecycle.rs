@@ -11,6 +11,10 @@ use gh_envoy::lifecycle::{ClaimOptions, claim_issue, claim_issue_with_options};
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::assert_same_existing_path;
+
 fn envoy() -> Command {
     #[allow(deprecated)]
     Command::cargo_bin("gh-envoy").expect("gh-envoy binary should build")
@@ -55,15 +59,7 @@ fn configured_base_and_worktree_root_override_defaults() {
 
     assert_eq!(value["claim"]["base_ref"], "trunk");
     let worktree = PathBuf::from(value["claim"]["worktree"].as_str().expect("worktree"));
-    let actual_root = worktree
-        .parent()
-        .expect("worktree parent")
-        .canonicalize()
-        .expect("canonical worktree parent");
-    let expected_root = worktree_root
-        .canonicalize()
-        .expect("canonical configured worktree root");
-    assert_eq!(actual_root, expected_root);
+    assert_same_existing_path(worktree.parent().expect("worktree parent"), &worktree_root);
 }
 
 #[test]

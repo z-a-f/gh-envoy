@@ -6,6 +6,10 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+mod support;
+
+use support::assert_same_existing_path;
+
 fn envoy() -> Command {
     #[allow(deprecated)]
     Command::cargo_bin("gh-envoy").expect("gh-envoy binary should build")
@@ -25,18 +29,10 @@ fn fresh_claim_and_marker_only_release_work_end_to_end() {
     let worktree = PathBuf::from(claim["claim"]["worktree"].as_str().expect("worktree"));
     assert!(branch.starts_with("envoy/issue-123-"));
     assert!(worktree.exists());
-    let actual_parent = worktree
-        .parent()
-        .expect("worktree parent")
-        .canonicalize()
-        .expect("canonical worktree parent");
-    let expected_parent = fixture
-        .repository()
-        .parent()
-        .expect("repository parent")
-        .canonicalize()
-        .expect("canonical repository parent");
-    assert_eq!(actual_parent, expected_parent);
+    assert_same_existing_path(
+        worktree.parent().expect("worktree parent"),
+        fixture.repository().parent().expect("repository parent"),
+    );
     assert_eq!(fixture.git_stdout(&["rev-parse", branch]), expected_base);
 
     let release = fixture.envoy_json(&["release", "123", "--reason", "merged", "--json"], 0);
@@ -230,13 +226,13 @@ fn branch_and_worktree_adoption_preserve_existing_git_state() {
     );
 
     assert_eq!(worktree_claim["claim"]["branch"], "worktree-branch");
-    assert_eq!(
+    assert_same_existing_path(
         PathBuf::from(
             worktree_claim["claim"]["worktree"]
                 .as_str()
-                .expect("worktree")
+                .expect("worktree"),
         ),
-        adopted_worktree.canonicalize().expect("canonical worktree")
+        &adopted_worktree,
     );
 
     fixture.git(&["branch", "registered-branch", "main"]);
@@ -252,15 +248,13 @@ fn branch_and_worktree_adoption_preserve_existing_git_state() {
         &["claim", "203", "--branch", "registered-branch", "--json"],
         0,
     );
-    assert_eq!(
+    assert_same_existing_path(
         PathBuf::from(
             registered_claim["claim"]["worktree"]
                 .as_str()
-                .expect("registered worktree")
+                .expect("registered worktree"),
         ),
-        registered_worktree
-            .canonicalize()
-            .expect("canonical registered worktree")
+        &registered_worktree,
     );
 
     fixture.git(&["branch", "paired-branch", "main"]);
