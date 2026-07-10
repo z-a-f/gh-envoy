@@ -66,7 +66,14 @@ gh envoy release 123
 gh envoy release 123 --reason merged
 ```
 
-`status` and `doctor` remain explicit `not_implemented` placeholders until their owning slices land.
+Inspect all active claims and their local coordination findings from any registered worktree:
+
+```sh
+gh envoy status
+gh envoy status --json
+```
+
+Status derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands. `doctor` remains an explicit `not_implemented` placeholder until its owning slice lands.
 
 ## Architecture
 

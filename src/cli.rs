@@ -10,6 +10,7 @@ use crate::command::SystemRunner;
 use crate::exit::EnvoyExitCode;
 use crate::lifecycle::{ClaimOptions, LifecycleError, claim_issue_with_options, release_claim};
 use crate::model::{Claim, ReleaseReason, ReleaseReport};
+use crate::status::{get_status, render_status_human, status_document};
 
 pub const SCHEMA_VERSION: &str = "0.1";
 
@@ -167,8 +168,45 @@ pub fn main_entry() -> EnvoyExitCode {
 fn run(cli: Cli) -> EnvoyExitCode {
     match cli.command {
         EnvoyCommand::Claim(arguments) => run_claim(arguments, cli.json),
+        EnvoyCommand::Status => run_status(cli.json),
         EnvoyCommand::Release(arguments) => run_release(arguments, cli.json),
         command => run_stub(command.name(), cli.json),
+    }
+}
+
+fn run_status(json: bool) -> EnvoyExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return render_error(
+                "status",
+                json,
+                "current_directory",
+                &error.to_string(),
+                false,
+            );
+        }
+    };
+    match get_status(&SystemRunner, &cwd) {
+        Ok(report) => {
+            if json {
+                write_json(&status_document(&report));
+            } else {
+                let _ = write!(io::stdout().lock(), "{}", render_status_human(&report));
+            }
+            if report.has_warnings() {
+                EnvoyExitCode::Warning
+            } else {
+                EnvoyExitCode::Success
+            }
+        }
+        Err(error) => render_error(
+            "status",
+            json,
+            "operational_error",
+            &error.to_string(),
+            false,
+        ),
     }
 }
 
