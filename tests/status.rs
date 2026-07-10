@@ -13,6 +13,10 @@ use gh_envoy::status::{
 };
 use uuid::Uuid;
 
+mod support;
+
+use support::assert_text_eq;
+
 #[test]
 fn human_and_json_status_goldens_are_stable() {
     let report = fixture_report();
@@ -20,8 +24,13 @@ fn human_and_json_status_goldens_are_stable() {
     let human = render_status_human(&report);
     let json = serde_json::to_string(&status_document(&report)).expect("serialize status");
 
-    assert_eq!(human, include_str!("golden/status-human.txt"));
-    assert_eq!(json, include_str!("golden/status-json.json").trim_end());
+    assert_text_eq(&human, include_str!("golden/status-human.txt"));
+    assert_text_eq(&json, include_str!("golden/status-json.json").trim_end());
+}
+
+#[test]
+fn golden_comparison_accepts_platform_line_endings() {
+    assert_text_eq("first\nsecond\n", "first\r\nsecond\r\n");
 }
 
 #[test]
