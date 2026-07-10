@@ -12,6 +12,7 @@ use gh_envoy::model::{
     ReleaseReason, SCHEMA_VERSION,
 };
 use gh_envoy::store::{PreparedAtomicWrite, Store};
+use serde::{Serialize, Serializer};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -25,6 +26,7 @@ fn read_only_listing_does_not_create_store_state() {
     let claims = store.list_claims(issue(7)).expect("list absent claims");
 
     assert!(claims.is_empty());
+    assert!(store.read_operation(Uuid::new_v4()).unwrap().is_none());
     assert!(!root.exists());
 }
 
@@ -35,6 +37,7 @@ fn locked_store_creates_layout_and_preserves_claim_generations() {
     let store = Store::new(root.clone());
     let first = claim(common_dir.path(), Uuid::new_v4());
     let second = claim(common_dir.path(), Uuid::new_v4());
+    assert_eq!(store.root(), root);
 
     {
         let locked = store.lock().expect("lock store");
@@ -42,6 +45,7 @@ fn locked_store_creates_layout_and_preserves_claim_generations() {
         locked.create_claim(&second).expect("write second claim");
         assert!(locked.create_claim(&first).is_err(), "claims are immutable");
     }
+    fs::write(root.join("claims/7/README"), b"ignored").expect("write non-JSON file");
 
     for path in ["lock", "operations", "claims", "releases"] {
         assert!(root.join(path).exists(), "missing {path}");
@@ -83,6 +87,99 @@ fn operation_updates_replace_whole_json_and_release_markers_are_immutable() {
     assert_eq!(persisted.phase, OperationPhase::WorktreeCreated);
     let bytes = fs::read(store.operation_path(operation_id)).expect("read operation JSON");
     serde_json::from_slice::<Value>(&bytes).expect("operation is complete JSON");
+}
+
+#[test]
+fn store_reports_layout_and_persistence_failures() {
+    let directory = TempDir::new().expect("temporary directory");
+
+    let root_file = directory.path().join("root-file");
+    fs::write(&root_file, b"not a directory").expect("write root blocker");
+    assert!(Store::new(root_file).lock().is_err());
+
+    let root = directory.path().join("lock-blocked");
+    fs::create_dir_all(root.join("lock")).expect("create directory at lock path");
+    assert!(Store::new(root).lock().is_err());
+
+    assert!(PreparedAtomicWrite::json(Path::new(""), &json!({"value": 1})).is_err());
+    assert!(
+        PreparedAtomicWrite::json(
+            &directory.path().join("missing/record.json"),
+            &json!({"value": 1})
+        )
+        .is_err()
+    );
+    assert!(
+        PreparedAtomicWrite::json(&directory.path().join("broken.json"), &BrokenSerialize).is_err()
+    );
+
+    let destination = directory.path().join("replace-target");
+    let prepared =
+        PreparedAtomicWrite::json(&destination, &json!({"value": 1})).expect("prepare write");
+    fs::create_dir(&destination).expect("create directory at destination");
+    assert!(prepared.replace().is_err());
+}
+
+#[test]
+fn store_rejects_corrupt_and_misplaced_records() {
+    let directory = TempDir::new().expect("temporary directory");
+
+    let operation_root = directory.path().join("invalid-operation/envoy");
+    let operation_store = Store::new(operation_root.clone());
+    let operation_id = Uuid::new_v4();
+    fs::create_dir_all(operation_root.join("operations")).expect("create operations directory");
+    fs::write(operation_store.operation_path(operation_id), b"not JSON")
+        .expect("write corrupt operation");
+    assert!(operation_store.read_operation(operation_id).is_err());
+
+    let mismatch_root = directory.path().join("mismatched-operation/envoy");
+    let mismatch_store = Store::new(mismatch_root.clone());
+    let stored_id = Uuid::new_v4();
+    let requested_id = Uuid::new_v4();
+    fs::create_dir_all(mismatch_root.join("operations")).expect("create operations directory");
+    fs::write(
+        mismatch_store.operation_path(requested_id),
+        serde_json::to_vec(&operation(directory.path(), stored_id)).expect("serialize operation"),
+    )
+    .expect("write misplaced operation");
+    assert!(mismatch_store.read_operation(requested_id).is_err());
+
+    let blocked_root = directory.path().join("blocked-claims/envoy");
+    fs::create_dir_all(blocked_root.join("claims")).expect("create claims directory");
+    fs::write(blocked_root.join("claims/7"), b"not a directory").expect("block issue path");
+    assert!(Store::new(blocked_root).list_claims(issue(7)).is_err());
+
+    let corrupt_root = directory.path().join("corrupt-claim/envoy");
+    fs::create_dir_all(corrupt_root.join("claims/7")).expect("create claim directory");
+    fs::write(corrupt_root.join("claims/7/bad.json"), b"not JSON").expect("write corrupt claim");
+    assert!(Store::new(corrupt_root).list_claims(issue(7)).is_err());
+
+    let misplaced_root = directory.path().join("misplaced-claim/envoy");
+    fs::create_dir_all(misplaced_root.join("claims/7")).expect("create claim directory");
+    let stored_claim = claim(directory.path(), Uuid::new_v4());
+    fs::write(
+        misplaced_root.join(format!("claims/7/{}.json", Uuid::new_v4())),
+        serde_json::to_vec(&stored_claim).expect("serialize claim"),
+    )
+    .expect("write misplaced claim");
+    assert!(Store::new(misplaced_root).list_claims(issue(7)).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn store_reports_claim_files_that_disappear() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDir::new().expect("temporary directory");
+    let root = directory.path().join("envoy");
+    fs::create_dir_all(root.join("claims/7")).expect("create claim directory");
+    symlink(
+        directory.path().join("missing"),
+        root.join("claims/7/missing.json"),
+    )
+    .expect("create broken claim symlink");
+
+    assert!(Store::new(root).list_claims(issue(7)).is_err());
 }
 
 #[test]
@@ -227,5 +324,18 @@ fn release(claim_id: Uuid) -> ReleaseMarker {
         claim_id,
         reason: ReleaseReason::Manual,
         released_at: Utc.with_ymd_and_hms(2026, 7, 10, 19, 0, 0).unwrap(),
+    }
+}
+
+struct BrokenSerialize;
+
+impl Serialize for BrokenSerialize {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Err(serde::ser::Error::custom(
+            "intentional serialization failure",
+        ))
     }
 }

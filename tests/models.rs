@@ -54,7 +54,8 @@ fn release_and_every_operation_phase_are_representable() {
         "reason": "manual",
         "released_at": "2026-07-10T18:00:00Z"
     });
-    ReleaseMarker::from_value(release).expect("valid release marker");
+    let release = ReleaseMarker::from_value(release).expect("valid release marker");
+    release.to_value().expect("serialize release marker");
 
     let directory = TempDir::new().expect("temporary worktree");
     for phase in [
@@ -77,9 +78,57 @@ fn release_and_every_operation_phase_are_representable() {
         });
         let record = OperationRecord::from_value(operation).expect("valid operation");
         assert_eq!(record.phase.as_str(), phase);
+        record.to_value().expect("serialize operation");
     }
 
     assert_eq!(OperationPhase::CleanupPending.as_str(), "cleanup_pending");
+}
+
+#[test]
+fn persisted_models_reject_empty_required_strings() {
+    let directory = TempDir::new().expect("temporary worktree");
+    for field in ["repo", "branch", "base_remote", "base_ref", "base_sha"] {
+        let mut value = valid_claim(directory.path());
+        value[field] = json!("  ");
+        assert!(Claim::from_value(value).is_err(), "accepted empty {field}");
+    }
+
+    let release = json!({
+        "schema_version": "0.1",
+        "repo": "",
+        "issue": 7,
+        "claim_id": "321ba92e-f076-4bc7-bd5b-6cc16cf76277",
+        "reason": "manual",
+        "released_at": "2026-07-10T18:00:00Z"
+    });
+    assert!(ReleaseMarker::from_value(release).is_err());
+
+    let operation = json!({
+        "schema_version": "0.1",
+        "operation_id": "2c9d1ce8-1a34-4a14-b55f-8260b02dccd0",
+        "kind": "cleanup",
+        "claim_id": "321ba92e-f076-4bc7-bd5b-6cc16cf76277",
+        "issue": 7,
+        "branch": "",
+        "worktree": directory.path(),
+        "phase": "cleanup_pending",
+        "started_at": "2026-07-10T18:00:00Z"
+    });
+    assert!(OperationRecord::from_value(operation).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn persisted_models_reject_non_utf8_worktree_paths() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::PathBuf;
+
+    let directory = TempDir::new().expect("temporary worktree");
+    let mut claim = Claim::from_value(valid_claim(directory.path())).expect("valid claim");
+    claim.worktree = PathBuf::from(OsString::from_vec(vec![b'/', 0xff]));
+
+    assert!(claim.to_value().is_err());
 }
 
 fn valid_claim(worktree: &std::path::Path) -> Value {

@@ -1,8 +1,9 @@
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Mutex;
 
-use gh_envoy::command::{CommandOutput, CommandRunner, CommandSpec, RunnerError};
+use gh_envoy::command::{CommandOutput, CommandRunner, CommandSpec, RunnerError, SystemRunner};
 use gh_envoy::git::{GitCli, GithubCli, RepositoryContext};
 use tempfile::TempDir;
 
@@ -22,6 +23,29 @@ impl CommandRunner for RecordingRunner {
             stdout: b"ok\n".to_vec(),
             stderr: Vec::new(),
         })
+    }
+}
+
+struct ScriptedRunner {
+    outputs: Mutex<VecDeque<CommandOutput>>,
+}
+
+impl ScriptedRunner {
+    fn new(outputs: impl IntoIterator<Item = CommandOutput>) -> Self {
+        Self {
+            outputs: Mutex::new(outputs.into_iter().collect()),
+        }
+    }
+}
+
+impl CommandRunner for ScriptedRunner {
+    fn run(&self, _spec: &CommandSpec) -> Result<CommandOutput, RunnerError> {
+        Ok(self
+            .outputs
+            .lock()
+            .expect("script lock")
+            .pop_front()
+            .expect("scripted command output"))
     }
 }
 
@@ -73,6 +97,80 @@ fn repository_discovery_reports_git_failures() {
         .expect_err("non-repository must fail");
 
     assert!(error.to_string().contains("rev-parse"), "{error}");
+}
+
+#[test]
+fn system_runner_reports_program_start_failures() {
+    let error = SystemRunner
+        .run(&CommandSpec::new("envoy-program-that-does-not-exist"))
+        .expect_err("missing program must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("envoy-program-that-does-not-exist")
+    );
+}
+
+#[test]
+fn cli_adapter_preserves_failed_command_context() {
+    let runner = ScriptedRunner::new([CommandOutput {
+        exit_code: Some(7),
+        stdout: Vec::new(),
+        stderr: b"fixture failure\n".to_vec(),
+    }]);
+
+    let error = GitCli::new(&runner)
+        .run(Path::new("fixture"), ["status", "--short"])
+        .expect_err("nonzero Git command must fail");
+
+    let message = error.to_string();
+    assert!(message.contains("git status --short"), "{message}");
+    assert!(message.contains("fixture failure"), "{message}");
+}
+
+#[test]
+fn repository_discovery_rejects_invalid_git_output() {
+    let directory = TempDir::new().expect("temporary existing path");
+    let existing = format!("{}\n", directory.path().display()).into_bytes();
+
+    let missing_path = directory.path().join("missing");
+    let runner = ScriptedRunner::new([success(format!("{}\n", missing_path.display()))]);
+    let error = RepositoryContext::discover_with_runner(&runner, directory.path(), "origin")
+        .expect_err("missing worktree path must fail");
+    assert!(error.to_string().contains("canonicalize"), "{error}");
+
+    let runner = ScriptedRunner::new([
+        success(existing.clone()),
+        success(existing.clone()),
+        success(Vec::new()),
+    ]);
+    let error = RepositoryContext::discover_with_runner(&runner, directory.path(), "origin")
+        .expect_err("empty worktree porcelain must fail");
+    assert!(error.to_string().contains("did not report a worktree"));
+
+    let runner = ScriptedRunner::new([
+        success(existing.clone()),
+        success(existing.clone()),
+        success(format!("worktree {}\n", directory.path().display())),
+        success("invalid-remote\n"),
+    ]);
+    let error = RepositoryContext::discover_with_runner(&runner, directory.path(), "origin")
+        .expect_err("remote without owner and repo must fail");
+    assert!(error.to_string().contains("owner/repository"));
+
+    let runner = ScriptedRunner::new([success(vec![0xff])]);
+    let error = RepositoryContext::discover_with_runner(&runner, directory.path(), "origin")
+        .expect_err("non-UTF-8 Git output must fail");
+    assert!(error.to_string().contains("non-UTF-8"));
+}
+
+fn success(stdout: impl Into<Vec<u8>>) -> CommandOutput {
+    CommandOutput {
+        exit_code: Some(0),
+        stdout: stdout.into(),
+        stderr: Vec::new(),
+    }
 }
 
 struct RepositoryFixture {
