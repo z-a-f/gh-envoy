@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -7,7 +8,7 @@ use serde::Serialize;
 
 use crate::command::SystemRunner;
 use crate::exit::EnvoyExitCode;
-use crate::lifecycle::{LifecycleError, claim_issue, release_claim};
+use crate::lifecycle::{ClaimOptions, LifecycleError, claim_issue_with_options, release_claim};
 use crate::model::{Claim, ReleaseReason, ReleaseReport};
 
 pub const SCHEMA_VERSION: &str = "0.1";
@@ -29,7 +30,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum EnvoyCommand {
     /// Claim an issue for work in an isolated worktree.
-    Claim(IssueArgs),
+    Claim(ClaimArgs),
     /// Show active claims and coordination findings.
     Status,
     /// Check local integrity, publish readiness, and merge coordination.
@@ -50,9 +51,30 @@ impl EnvoyCommand {
 }
 
 #[derive(Debug, Args)]
-pub struct IssueArgs {
+pub struct ClaimArgs {
     #[arg(value_parser = parse_issue)]
     pub issue: NonZeroU64,
+
+    #[arg(long, value_name = "BRANCH")]
+    pub branch: Option<String>,
+
+    #[arg(long, value_name = "PATH")]
+    pub worktree: Option<PathBuf>,
+
+    #[arg(long, value_name = "ISSUE", value_parser = parse_issue)]
+    pub onto: Option<NonZeroU64>,
+
+    #[arg(long, value_name = "ISSUE", value_parser = parse_issue)]
+    pub after: Vec<NonZeroU64>,
+
+    #[arg(long, value_name = "GLOB")]
+    pub scope: Vec<String>,
+
+    #[arg(long, value_name = "GLOB")]
+    pub disallow: Vec<String>,
+
+    #[arg(long, value_name = "TEXT")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -150,7 +172,7 @@ fn run(cli: Cli) -> EnvoyExitCode {
     }
 }
 
-fn run_claim(arguments: IssueArgs, json: bool) -> EnvoyExitCode {
+fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -163,7 +185,16 @@ fn run_claim(arguments: IssueArgs, json: bool) -> EnvoyExitCode {
             );
         }
     };
-    match claim_issue(&SystemRunner, &cwd, arguments.issue) {
+    let options = ClaimOptions {
+        branch: arguments.branch,
+        worktree: arguments.worktree,
+        onto: arguments.onto,
+        after: arguments.after,
+        allowed_paths: arguments.scope,
+        disallowed_paths: arguments.disallow,
+        note: arguments.note,
+    };
+    match claim_issue_with_options(&SystemRunner, &cwd, arguments.issue, options) {
         Ok(outcome) => {
             let status = if outcome.warnings.is_empty() {
                 "success"

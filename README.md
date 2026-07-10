@@ -39,6 +39,24 @@ Fresh, unstacked claims provision an isolated branch and worktree from an exact 
 gh envoy claim 123
 ```
 
+Existing local branches and registered worktrees can be adopted without resetting or moving them:
+
+```sh
+gh envoy claim 123 --branch my-existing-branch
+gh envoy claim 124 --worktree ../existing-worktree
+```
+
+Stack and consolidation intent records exact local claim generations when they are available. Optional scopes and notes are persisted with the claim for later coordination checks:
+
+```sh
+gh envoy claim 125 --onto 123
+gh envoy claim 126 --after 123 --after 124 \
+  --scope 'src/**' --disallow '.github/workflows/**' \
+  --note 'Coordinate this integration manually'
+```
+
+Adopted branches must contain the captured base, `--onto` requires an active local parent claim, and direct or duplicate dependencies are refused. Issue existence remains unverified until GitHub observation is implemented.
+
 Envoy first attempts to refresh the configured remote base. When the remote is unavailable, it can use an existing remote-tracking ref or local base branch and reports the unverified fallback explicitly. Claim state is journaled under the shared Git common directory so interrupted operations remain inspectable.
 
 Marker-only release is idempotent and preserves the generation's claim file, branch, and worktree:

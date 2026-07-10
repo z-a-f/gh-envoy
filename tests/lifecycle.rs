@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use gh_envoy::command::{CommandOutput, CommandRunner, CommandSpec, RunnerError, SystemRunner};
-use gh_envoy::lifecycle::claim_issue;
+use gh_envoy::lifecycle::{ClaimOptions, claim_issue, claim_issue_with_options};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -306,6 +306,39 @@ fn failed_rollback_keeps_cleanup_pending_operation_for_repair() {
 }
 
 #[test]
+fn rollback_removes_created_worktree_but_preserves_adopted_branch() {
+    let fixture = RepositoryFixture::with_remote();
+    fixture.git(&["branch", "adopted", "main"]);
+    let original_tip = fixture.git_stdout(&["rev-parse", "adopted"]);
+    let runner = FailCanonicalizationOnceRunner {
+        worktree_added: AtomicBool::new(false),
+        failure_injected: AtomicBool::new(false),
+    };
+    let issue = std::num::NonZeroU64::new(103).expect("positive issue");
+
+    let error = claim_issue_with_options(
+        &runner,
+        fixture.repository(),
+        issue,
+        ClaimOptions {
+            branch: Some("adopted".to_owned()),
+            ..ClaimOptions::default()
+        },
+    )
+    .expect_err("injected canonicalization failure");
+
+    assert!(error.to_string().contains("worktree list"), "{error}");
+    assert_eq!(fixture.git_stdout(&["rev-parse", "adopted"]), original_tip);
+    let worktrees = fixture.git_stdout(&["worktree", "list", "--porcelain"]);
+    assert_eq!(worktrees.matches("branch refs/heads/adopted").count(), 0);
+    let operations = fs::read_dir(fixture.store_root().join("operations"))
+        .expect("operations directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("operation entries");
+    assert!(operations.is_empty());
+}
+
+#[test]
 fn lifecycle_subprocess_helper() {
     let Some(checkpoint) = std::env::var_os("ENVOY_LIFECYCLE_HELPER_MODE") else {
         return;
@@ -393,6 +426,39 @@ struct CheckpointRunner {
 
 struct FailingRollbackRunner {
     worktree_added: AtomicBool,
+}
+
+struct FailCanonicalizationOnceRunner {
+    worktree_added: AtomicBool,
+    failure_injected: AtomicBool,
+}
+
+impl CommandRunner for FailCanonicalizationOnceRunner {
+    fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, RunnerError> {
+        let args = spec
+            .args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+        let worktree_add = args.first().is_some_and(|value| value == "worktree")
+            && args.get(1).is_some_and(|value| value == "add");
+        let canonical_list = self.worktree_added.load(Ordering::SeqCst)
+            && args.first().is_some_and(|value| value == "worktree")
+            && args.get(1).is_some_and(|value| value == "list")
+            && !self.failure_injected.swap(true, Ordering::SeqCst);
+        if canonical_list {
+            return Ok(CommandOutput {
+                exit_code: Some(1),
+                stdout: Vec::new(),
+                stderr: b"injected canonicalization failure\n".to_vec(),
+            });
+        }
+        let output = SystemRunner.run(spec)?;
+        if worktree_add && output.exit_code == Some(0) {
+            self.worktree_added.store(true, Ordering::SeqCst);
+        }
+        Ok(output)
+    }
 }
 
 impl CommandRunner for FailingRollbackRunner {
