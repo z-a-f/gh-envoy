@@ -27,9 +27,19 @@ jobs:
         with:
           shared-key: ci
           cache-on-failure: true
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets --locked
-      - run: cargo build --locked
+      - run: cargo fmt
+            --check
+      - run: cargo clippy
+            --all-targets
+            --all-features
+            -- -D warnings
+      - run: cargo test
+            --profile ci-dev
+            --all-targets
+            --locked
+      - run: cargo build
+            --locked
       - name: Smoke-test the extension entrypoint
-        run: cargo run --locked -- --help
+        run: cargo run
+            --locked
+            -- --help
