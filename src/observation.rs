@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::command::{CommandOutput, CommandRunner, RunnerError, text_from_utf8_output};
 use crate::config::{Config, ConfigError};
+use crate::conflict::{ConflictError, DiffOverlap, ScopeWarning, analyze_claims};
 use crate::git::{CliCommandError, GitCli, RepositoryContext, RepositoryError};
 use crate::model::{Claim, OperationRecord};
 use crate::store::{Store, StoreError};
@@ -26,6 +27,8 @@ pub struct DiffSummary {
 pub struct ClaimObservation {
     pub claim: Claim,
     pub diff: Option<DiffSummary>,
+    pub overlaps: Vec<DiffOverlap>,
+    pub scope_warnings: Vec<ScopeWarning>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -120,8 +123,15 @@ pub fn observe_repository<R: CommandRunner>(
         } else {
             None
         };
-        observed_claims.push(ClaimObservation { claim, diff });
+        observed_claims.push(ClaimObservation {
+            claim,
+            diff,
+            overlaps: Vec::new(),
+            scope_warnings: Vec::new(),
+        });
     }
+
+    analyze_claims(&mut observed_claims, &config.risk_paths)?;
 
     Ok(LocalObservation {
         claims: observed_claims,
@@ -363,6 +373,8 @@ pub enum ObservationError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(transparent)]
+    Conflict(#[from] ConflictError),
     #[error(transparent)]
     Git(#[from] CliCommandError),
     #[error(transparent)]
