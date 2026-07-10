@@ -5,4 +5,5 @@ pub mod exit;
 pub mod git;
 pub mod lifecycle;
 pub mod model;
+pub mod observation;
 pub mod store;

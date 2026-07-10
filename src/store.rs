@@ -206,6 +206,48 @@ impl Store {
         Ok(Some(operation))
     }
 
+    pub fn list_operations(&self) -> Result<Vec<OperationRecord>, StoreError> {
+        let directory = self.root.join("operations");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(StoreError::Io {
+                    action: "list operation records",
+                    path: directory,
+                    source,
+                });
+            }
+        };
+        let mut operations = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| StoreError::Io {
+                action: "read operation directory entry",
+                path: directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let operation = read_operation(&path)?;
+            let filename = path.file_stem().and_then(|value| value.to_str());
+            if filename != Some(operation.operation_id.to_string().as_str()) {
+                return Err(StoreError::LocationMismatch {
+                    path,
+                    message: "operation_id does not match its filename".to_owned(),
+                });
+            }
+            operations.push(operation);
+        }
+        operations.sort_by(|left, right| {
+            left.started_at
+                .cmp(&right.started_at)
+                .then_with(|| left.operation_id.cmp(&right.operation_id))
+        });
+        Ok(operations)
+    }
+
     pub fn operation_path(&self, operation_id: Uuid) -> PathBuf {
         self.root
             .join("operations")
@@ -416,6 +458,19 @@ fn read_release(path: &Path) -> Result<ReleaseMarker, StoreError> {
         source,
     })?;
     ReleaseMarker::from_value(value).map_err(StoreError::Model)
+}
+
+fn read_operation(path: &Path) -> Result<OperationRecord, StoreError> {
+    let bytes = fs::read(path).map_err(|source| StoreError::Io {
+        action: "read operation record",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|source| StoreError::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    OperationRecord::from_value(value).map_err(StoreError::Model)
 }
 
 fn validate_claim_location(
