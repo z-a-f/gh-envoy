@@ -4,10 +4,10 @@ Overall: error
 Gates: integrity=error publish=ok merge=blocked
 
 Checks:
-PASS  [integrity] Claim schema: claim schema is valid
-SKIP  [publish] Remote verification: remote checks were not requested
-FAIL  [merge] Merge overlap: claim overlaps an unrelated active claim
-ERROR [integrity] Operation journal: operation journal could not be read
+✓ [integrity] Claim schema: claim schema is valid
+- [publish] Remote verification: remote checks were not requested
+✗ [merge] Merge overlap: claim overlaps an unrelated active claim
+× [integrity] Operation journal: operation journal could not be read
 
 Recommendations:
 - repair the operation journal before continuing

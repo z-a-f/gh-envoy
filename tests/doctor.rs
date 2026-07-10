@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 use chrono::{TimeZone, Utc};
 use gh_envoy::doctor::{
     CheckGate, CheckStatus, DoctorCheck, DoctorReport, DoctorSubject, GateRollup, doctor_document,
-    render_doctor_human, rollup_gate,
+    redact_doctor_paths, render_doctor_human, rollup_gate,
 };
 use gh_envoy::exit::EnvoyExitCode;
 
@@ -114,6 +114,62 @@ fn human_and_json_doctor_goldens_are_stable() {
 
     assert_text_eq(&human, include_str!("golden/doctor-human.txt"));
     assert_text_eq(&json, include_str!("golden/doctor-json.json").trim_end());
+}
+
+#[test]
+fn json_path_redaction_preserves_human_report_source() {
+    let report = DoctorReport::new(
+        subject(),
+        vec![
+            DoctorCheck::new(
+                "integrity.operation_journal",
+                CheckGate::Integrity,
+                "Operation journal",
+                CheckStatus::Fail,
+                "cleanup /private/repos/feature before continuing",
+            )
+            .with_evidence(serde_json::json!({
+                "worktree": "/private/repos/feature",
+                "recovery": {
+                    "commands": [{
+                        "program": "git",
+                        "args": ["worktree", "remove", "--", "/private/repos/feature"]
+                    }],
+                    "remove_journal": "/private/repos/main/.git/envoy/operations/op.json"
+                }
+            })),
+        ],
+        vec!["Run: git worktree remove -- /private/repos/feature".to_owned()],
+        timestamp(),
+    );
+
+    let redacted = redact_doctor_paths(&report);
+    let json = serde_json::to_string(&redacted).expect("serialize redacted report");
+
+    assert!(!json.contains("/private/"));
+    assert!(json.contains("…/feature"));
+    assert!(json.contains("…/op.json"));
+    assert!(report.recommendations[0].contains("/private/repos/feature"));
+}
+
+#[test]
+fn human_renderer_distinguishes_warning_symbol_and_stack_subject() {
+    let report = DoctorReport::new(
+        DoctorSubject {
+            repo: "local/fixture".to_owned(),
+            issue: None,
+            stack: true,
+        },
+        vec![check(CheckStatus::Warn)],
+        Vec::new(),
+        timestamp(),
+    );
+
+    let human = render_doctor_human(&report);
+
+    assert!(human.starts_with("Doctor report for local/fixture stack"));
+    assert!(human.contains("! [integrity] Example: example result"));
+    assert!(human.ends_with("Recommendations:\n- None\n"));
 }
 
 fn check(status: CheckStatus) -> DoctorCheck {

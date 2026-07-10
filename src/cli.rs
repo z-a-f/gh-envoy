@@ -7,7 +7,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::command::SystemRunner;
+use crate::config::Config;
+use crate::doctor::{doctor_document, doctor_repository, redact_doctor_paths, render_doctor_human};
 use crate::exit::EnvoyExitCode;
+use crate::git::RepositoryContext;
 use crate::lifecycle::{ClaimOptions, LifecycleError, claim_issue_with_options, release_claim};
 use crate::model::{Claim, ReleaseReason, ReleaseReport};
 use crate::status::{get_status, render_status_human, status_document};
@@ -38,17 +41,6 @@ pub enum EnvoyCommand {
     Doctor(DoctorArgs),
     /// Release an active claim.
     Release(ReleaseArgs),
-}
-
-impl EnvoyCommand {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Claim(_) => "claim",
-            Self::Status => "status",
-            Self::Doctor(_) => "doctor",
-            Self::Release(_) => "release",
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -169,9 +161,57 @@ fn run(cli: Cli) -> EnvoyExitCode {
     match cli.command {
         EnvoyCommand::Claim(arguments) => run_claim(arguments, cli.json),
         EnvoyCommand::Status => run_status(cli.json),
+        EnvoyCommand::Doctor(arguments) => run_doctor(arguments, cli.json),
         EnvoyCommand::Release(arguments) => run_release(arguments, cli.json),
-        command => run_stub(command.name(), cli.json),
     }
+}
+
+fn run_doctor(arguments: DoctorArgs, json: bool) -> EnvoyExitCode {
+    if arguments.stack.is_some() {
+        return run_stub("doctor --stack", json);
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return render_error(
+                "doctor",
+                json,
+                "current_directory",
+                &error.to_string(),
+                false,
+            );
+        }
+    };
+    match doctor_repository(&SystemRunner, &cwd, arguments.issue) {
+        Ok(report) => {
+            let exit_code = report.exit_code();
+            if json {
+                let report = if doctor_json_redacts_paths(&cwd) {
+                    redact_doctor_paths(&report)
+                } else {
+                    report
+                };
+                write_json(&doctor_document(&report));
+            } else {
+                let _ = write!(io::stdout().lock(), "{}", render_doctor_human(&report));
+            }
+            exit_code
+        }
+        Err(error) => render_error(
+            "doctor",
+            json,
+            "operational_error",
+            &error.to_string(),
+            false,
+        ),
+    }
+}
+
+fn doctor_json_redacts_paths(cwd: &std::path::Path) -> bool {
+    let Ok(common_dir) = RepositoryContext::discover_common_dir(cwd) else {
+        return true;
+    };
+    Config::load(&common_dir).map_or(true, |config| config.redact_paths_in_json)
 }
 
 fn run_status(json: bool) -> EnvoyExitCode {
@@ -398,13 +438,34 @@ fn parse_issue(value: &str) -> Result<NonZeroU64, String> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use std::fs;
 
-    use super::{Cli, EnvoyCommand};
+    use clap::Parser;
+    use tempfile::TempDir;
+
+    use super::{Cli, EnvoyCommand, doctor_json_redacts_paths};
 
     #[test]
     fn doctor_allows_no_specific_subject() {
         let cli = Cli::try_parse_from(["gh-envoy", "doctor"]).expect("doctor parses");
         assert!(matches!(cli.command, EnvoyCommand::Doctor(_)));
+    }
+
+    #[test]
+    fn doctor_json_path_redaction_honors_common_directory_config() {
+        let repository = TempDir::new().expect("temporary repository");
+        let status = std::process::Command::new("git")
+            .current_dir(repository.path())
+            .args(["init", "-q"])
+            .status()
+            .expect("initialize Git repository");
+        assert!(status.success());
+        assert!(doctor_json_redacts_paths(repository.path()));
+
+        let envoy = repository.path().join(".git/envoy");
+        fs::create_dir(&envoy).expect("create Envoy directory");
+        fs::write(envoy.join("config.yml"), "redact_paths_in_json: false\n").expect("write config");
+
+        assert!(!doctor_json_redacts_paths(repository.path()));
     }
 }

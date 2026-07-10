@@ -73,7 +73,17 @@ gh envoy status
 gh envoy status --json
 ```
 
-Status derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands. `doctor` remains an explicit `not_implemented` placeholder until its owning slice lands.
+Status derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands.
+
+Run local integrity checks for the repository or one active issue:
+
+```sh
+gh envoy doctor
+gh envoy doctor 123
+gh envoy doctor 123 --json
+```
+
+Doctor verifies persisted claim schemas, canonical worktree ownership, branches, captured base SHAs, diff derivation, and interrupted operation journals without mutating Git or Envoy state. It reports separate integrity, publish, and merge gates, uses exit codes `0` for ok, `1` for warning, `2` for blocked, and `3` for an operational error, and emits conservative recovery commands for abandoned operations. Path evidence is shortened in JSON by default according to `redact_paths_in_json`; human recovery instructions retain full paths. Stack-wide doctor checks remain explicitly unavailable until the stack coordination slice lands.
 
 ## Architecture
 
