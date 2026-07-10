@@ -23,3 +23,8 @@ assert_cmd = "2"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[profile.ci-dev]
+inherits = "dev"
+debug = "line-tables-only"
+incremental = false
