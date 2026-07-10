@@ -55,7 +55,15 @@ fn configured_base_and_worktree_root_override_defaults() {
 
     assert_eq!(value["claim"]["base_ref"], "trunk");
     let worktree = PathBuf::from(value["claim"]["worktree"].as_str().expect("worktree"));
-    assert_eq!(worktree.parent(), Some(worktree_root.as_path()));
+    let actual_root = worktree
+        .parent()
+        .expect("worktree parent")
+        .canonicalize()
+        .expect("canonical worktree parent");
+    let expected_root = worktree_root
+        .canonicalize()
+        .expect("canonical configured worktree root");
+    assert_eq!(actual_root, expected_root);
 }
 
 #[test]

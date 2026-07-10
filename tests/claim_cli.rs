@@ -25,7 +25,18 @@ fn fresh_claim_and_marker_only_release_work_end_to_end() {
     let worktree = PathBuf::from(claim["claim"]["worktree"].as_str().expect("worktree"));
     assert!(branch.starts_with("envoy/issue-123-"));
     assert!(worktree.exists());
-    assert_eq!(worktree.parent(), fixture.repository().parent());
+    let actual_parent = worktree
+        .parent()
+        .expect("worktree parent")
+        .canonicalize()
+        .expect("canonical worktree parent");
+    let expected_parent = fixture
+        .repository()
+        .parent()
+        .expect("repository parent")
+        .canonicalize()
+        .expect("canonical repository parent");
+    assert_eq!(actual_parent, expected_parent);
     assert_eq!(fixture.git_stdout(&["rev-parse", branch]), expected_base);
 
     let release = fixture.envoy_json(&["release", "123", "--reason", "merged", "--json"], 0);

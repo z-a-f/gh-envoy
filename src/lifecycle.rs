@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::command::{CommandRunner, RunnerError, text_from_utf8_output};
 use crate::config::{Config, ConfigError};
-use crate::git::{CliCommandError, GitCli, RepositoryContext, RepositoryError};
+use crate::git::{CliCommandError, GitCli, RepositoryContext, RepositoryError, canonical_existing};
 use crate::model::{
     Claim, DeclaredScope, OperationKind, OperationPhase, OperationRecord, ReleaseMarker,
     ReleaseReason, ReleaseReport, SCHEMA_VERSION,
@@ -423,11 +423,7 @@ fn canonical_worktree<R: CommandRunner>(
             "git worktree list did not report branch {branch:?}"
         ))
     })?;
-    path.canonicalize().map_err(|source| LifecycleError::Io {
-        action: "canonicalize created worktree",
-        path,
-        source,
-    })
+    canonical_existing(path).map_err(LifecycleError::Repository)
 }
 
 fn short_id(id: Uuid) -> String {

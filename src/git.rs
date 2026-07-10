@@ -204,12 +204,15 @@ impl RepositoryContext {
     }
 }
 
-fn canonical_existing(path: PathBuf) -> Result<PathBuf, RepositoryError> {
+pub(crate) fn canonical_existing(path: PathBuf) -> Result<PathBuf, RepositoryError> {
     path.canonicalize()
+        .map(without_windows_verbatim_prefix)
         .map_err(|source| RepositoryError::Canonicalize { path, source })
 }
 
 fn repository_slug(remote_url: &str) -> Result<String, RepositoryError> {
+    let normalized = remote_url.replace('\\', "/");
+    let remote_url = normalized.as_str();
     let path = if let Some((_, path)) = remote_url.rsplit_once(':') {
         if remote_url.contains("://") {
             remote_url
@@ -237,6 +240,19 @@ fn repository_slug(remote_url: &str) -> Result<String, RepositoryError> {
     Ok(format!("{owner}/{repo}"))
 }
 
+fn without_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(value) = path.to_str() else {
+        return path;
+    };
+    if let Some(value) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{value}"))
+    } else if let Some(value) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(value)
+    } else {
+        path
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RepositoryError {
     #[error(transparent)]
@@ -253,7 +269,9 @@ pub enum RepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::repository_slug;
+    use std::path::PathBuf;
+
+    use super::{repository_slug, without_windows_verbatim_prefix};
 
     #[test]
     fn repository_slug_supports_common_github_remote_forms() {
@@ -267,5 +285,25 @@ mod tests {
                 "z-a-f/gh-envoy"
             );
         }
+    }
+
+    #[test]
+    fn repository_slug_supports_windows_local_remote_paths() {
+        assert_eq!(
+            repository_slug(r"C:\Users\runner\fixture\remote.git").expect("valid local remote"),
+            "fixture/remote"
+        );
+    }
+
+    #[test]
+    fn git_paths_drop_windows_verbatim_prefixes() {
+        assert_eq!(
+            without_windows_verbatim_prefix(PathBuf::from(r"\\?\C:\work\fixture")),
+            PathBuf::from(r"C:\work\fixture")
+        );
+        assert_eq!(
+            without_windows_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\fixture")),
+            PathBuf::from(r"\\server\share\fixture")
+        );
     }
 }
