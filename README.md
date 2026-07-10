@@ -72,6 +72,7 @@ gh envoy release 123 --reason merged
 
 - CLI entry points only parse, dispatch, render, and map stable exit codes.
 - Coordination logic lives in the library independently of rendering.
+- Local observation derives active claim diffs and integrity problems without mutating stored state.
 - Git and GitHub command adapters are typed and mockable.
 - Envoy-owned state lives under the repository's shared Git common directory, never in a worktree.
 - Store mutations use an OS advisory lock and same-directory atomic replacement.

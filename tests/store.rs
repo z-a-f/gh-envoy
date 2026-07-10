@@ -26,6 +26,12 @@ fn read_only_listing_does_not_create_store_state() {
     let claims = store.list_claims(issue(7)).expect("list absent claims");
 
     assert!(claims.is_empty());
+    assert!(
+        store
+            .list_operations()
+            .expect("list absent operations")
+            .is_empty()
+    );
     assert!(store.read_operation(Uuid::new_v4()).unwrap().is_none());
     assert!(!root.exists());
 }
@@ -85,6 +91,10 @@ fn operation_updates_replace_whole_json_and_release_markers_are_immutable() {
         .expect("read operation")
         .expect("operation exists");
     assert_eq!(persisted.phase, OperationPhase::WorktreeCreated);
+    assert_eq!(
+        store.list_operations().expect("list operations"),
+        [persisted]
+    );
     let bytes = fs::read(store.operation_path(operation_id)).expect("read operation JSON");
     serde_json::from_slice::<Value>(&bytes).expect("operation is complete JSON");
 
@@ -168,6 +178,7 @@ fn store_rejects_corrupt_and_misplaced_records() {
     fs::write(operation_store.operation_path(operation_id), b"not JSON")
         .expect("write corrupt operation");
     assert!(operation_store.read_operation(operation_id).is_err());
+    assert!(operation_store.list_operations().is_err());
 
     let mismatch_root = directory.path().join("mismatched-operation/envoy");
     let mismatch_store = Store::new(mismatch_root.clone());
@@ -180,6 +191,7 @@ fn store_rejects_corrupt_and_misplaced_records() {
     )
     .expect("write misplaced operation");
     assert!(mismatch_store.read_operation(requested_id).is_err());
+    assert!(mismatch_store.list_operations().is_err());
 
     let blocked_root = directory.path().join("blocked-claims/envoy");
     fs::create_dir_all(blocked_root.join("claims")).expect("create claims directory");
