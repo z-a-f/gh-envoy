@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod command;
 pub mod config;
+pub mod conflict;
 pub mod exit;
 pub mod git;
 pub mod lifecycle;

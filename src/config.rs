@@ -5,6 +5,24 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::conflict::validate_glob_pattern;
+
+const DEFAULT_RISK_PATHS: &[(&str, &str)] = &[
+    (
+        "**/{Cargo.lock,package-lock.json,pnpm-lock.yaml,yarn.lock,uv.lock,poetry.lock,Pipfile.lock}",
+        "lockfile",
+    ),
+    ("**/{migration,migrations}/**", "migration"),
+    (
+        "**/{Cargo.toml,pyproject.toml,package.json,go.mod,pom.xml,build.gradle,build.gradle.kts,*.csproj}",
+        "project_config",
+    ),
+    (".github/workflows/**", "workflow"),
+    ("**/{test,tests}/**", "test"),
+    ("**/*.{test,spec}.*", "test"),
+    ("**/*_{test,spec}.*", "test"),
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub base_remote: String,
@@ -21,7 +39,10 @@ impl Default for Config {
             default_base_ref: None,
             worktree_root: None,
             redact_paths_in_json: true,
-            risk_paths: BTreeMap::new(),
+            risk_paths: DEFAULT_RISK_PATHS
+                .iter()
+                .map(|(glob, label)| ((*glob).to_owned(), (*label).to_owned()))
+                .collect(),
         }
     }
 }
@@ -55,7 +76,7 @@ impl Config {
             config.redact_paths_in_json = value;
         }
         if let Some(value) = overlay.risk_paths {
-            config.risk_paths = value;
+            config.risk_paths.extend(value);
         }
         config.validate(&path)?;
         Ok(config)
@@ -97,6 +118,14 @@ impl Config {
                 path: path.to_path_buf(),
                 message: "risk path globs and labels must not be empty".to_owned(),
             });
+        }
+        for glob in self.risk_paths.keys() {
+            if let Err(error) = validate_glob_pattern(glob) {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: format!("invalid risk path glob {glob:?}: {error}"),
+                });
+            }
         }
         Ok(())
     }

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use gh_envoy::command::SystemRunner;
+use gh_envoy::conflict::{OverlapConfidence, OverlapRelationship};
 use gh_envoy::model::{Claim, OperationKind, OperationPhase, OperationRecord, SCHEMA_VERSION};
 use gh_envoy::observation::{LocalProblemCode, observe_repository};
 use gh_envoy::store::Store;
@@ -186,6 +187,42 @@ fn abandoned_operations_are_visible_as_observed_problems() {
         problem.code == LocalProblemCode::AbandonedOperation
             && problem.operation_id == Some(operation.operation_id)
     }));
+}
+
+#[test]
+fn real_untracked_overlap_is_lower_confidence_and_ignored_paths_stay_absent() {
+    let fixture = RepositoryFixture::new();
+    let base = fixture.git_stdout(fixture.repository(), &["rev-parse", "HEAD"]);
+    let first_worktree = fixture.add_worktree("first", &base);
+    let second_worktree = fixture.add_worktree("second", &base);
+    let first = fixture.persist_claim(51, "first", &first_worktree, &base);
+    let second = fixture.persist_claim(52, "second", &second_worktree, &base);
+    for worktree in [&first_worktree, &second_worktree] {
+        fs::write(worktree.join("shared-new.rs"), "new\n").expect("write untracked path");
+        fs::write(worktree.join("shared-ignored.log"), "ignored\n").expect("write ignored path");
+    }
+
+    let observation = observe_repository(&SystemRunner, fixture.repository()).expect("observe");
+    let first_observation = observation
+        .claims
+        .iter()
+        .find(|observed| observed.claim.claim_id == first.claim_id)
+        .expect("first observation");
+    let overlap = first_observation
+        .overlaps
+        .iter()
+        .find(|overlap| overlap.with_claim_id == second.claim_id)
+        .expect("untracked overlap");
+
+    assert_eq!(overlap.relationship, OverlapRelationship::Unrelated);
+    assert_eq!(overlap.confidence, OverlapConfidence::Untracked);
+    assert_eq!(overlap.shared_paths, ["shared-new.rs"]);
+    assert!(
+        !overlap
+            .shared_paths
+            .iter()
+            .any(|path| path.ends_with(".log"))
+    );
 }
 
 struct RepositoryFixture {
