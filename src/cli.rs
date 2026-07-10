@@ -2,10 +2,13 @@ use std::io::{self, Write};
 use std::num::NonZeroU64;
 
 use clap::error::ErrorKind;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::command::SystemRunner;
 use crate::exit::EnvoyExitCode;
+use crate::lifecycle::{LifecycleError, claim_issue, release_claim};
+use crate::model::{Claim, ReleaseReason, ReleaseReport};
 
 pub const SCHEMA_VERSION: &str = "0.1";
 
@@ -32,7 +35,7 @@ pub enum EnvoyCommand {
     /// Check local integrity, publish readiness, and merge coordination.
     Doctor(DoctorArgs),
     /// Release an active claim.
-    Release(IssueArgs),
+    Release(ReleaseArgs),
 }
 
 impl EnvoyCommand {
@@ -50,6 +53,34 @@ impl EnvoyCommand {
 pub struct IssueArgs {
     #[arg(value_parser = parse_issue)]
     pub issue: NonZeroU64,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseArgs {
+    #[arg(value_parser = parse_issue)]
+    pub issue: NonZeroU64,
+
+    #[arg(long, value_enum, default_value_t = ReleaseReasonArg::Manual)]
+    pub reason: ReleaseReasonArg,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReleaseReasonArg {
+    Merged,
+    Closed,
+    Abandoned,
+    Manual,
+}
+
+impl From<ReleaseReasonArg> for ReleaseReason {
+    fn from(value: ReleaseReasonArg) -> Self {
+        match value {
+            ReleaseReasonArg::Merged => Self::Merged,
+            ReleaseReasonArg::Closed => Self::Closed,
+            ReleaseReasonArg::Abandoned => Self::Abandoned,
+            ReleaseReasonArg::Manual => Self::Manual,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -75,9 +106,27 @@ struct ErrorBody<'a> {
     message: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct ClaimEnvelope<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    claim: &'a Claim,
+    warnings: &'a [String],
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseEnvelope<'a> {
+    schema_version: &'static str,
+    command: &'static str,
+    status: &'static str,
+    release: &'a ReleaseReport,
+    warnings: &'a [String],
+}
+
 pub fn main_entry() -> EnvoyExitCode {
     match Cli::try_parse() {
-        Ok(cli) => run_stub(cli),
+        Ok(cli) => run(cli),
         Err(error) => {
             let is_help = matches!(
                 error.kind(),
@@ -93,11 +142,166 @@ pub fn main_entry() -> EnvoyExitCode {
     }
 }
 
-fn run_stub(cli: Cli) -> EnvoyExitCode {
-    let command = cli.command.name();
+fn run(cli: Cli) -> EnvoyExitCode {
+    match cli.command {
+        EnvoyCommand::Claim(arguments) => run_claim(arguments, cli.json),
+        EnvoyCommand::Release(arguments) => run_release(arguments, cli.json),
+        command => run_stub(command.name(), cli.json),
+    }
+}
+
+fn run_claim(arguments: IssueArgs, json: bool) -> EnvoyExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return render_error(
+                "claim",
+                json,
+                "current_directory",
+                &error.to_string(),
+                false,
+            );
+        }
+    };
+    match claim_issue(&SystemRunner, &cwd, arguments.issue) {
+        Ok(outcome) => {
+            let status = if outcome.warnings.is_empty() {
+                "success"
+            } else {
+                "warning"
+            };
+            if json {
+                write_json(&ClaimEnvelope {
+                    schema_version: SCHEMA_VERSION,
+                    command: "claim",
+                    status,
+                    claim: &outcome.claim,
+                    warnings: &outcome.warnings,
+                });
+            } else {
+                for warning in &outcome.warnings {
+                    let _ = writeln!(io::stderr().lock(), "warning: {warning}");
+                }
+                let _ = writeln!(
+                    io::stdout().lock(),
+                    "Claimed issue #{} as {}\nBranch: {}\nWorktree: {}\nBase: {}/{} at {}",
+                    outcome.claim.issue,
+                    &outcome.claim.claim_id.to_string()[..8],
+                    outcome.claim.branch,
+                    outcome.claim.worktree.display(),
+                    outcome.claim.base_remote,
+                    outcome.claim.base_ref,
+                    outcome.claim.base_sha,
+                );
+            }
+            if outcome.warnings.is_empty() {
+                EnvoyExitCode::Success
+            } else {
+                EnvoyExitCode::Warning
+            }
+        }
+        Err(error) => render_lifecycle_error("claim", json, &error),
+    }
+}
+
+fn run_release(arguments: ReleaseArgs, json: bool) -> EnvoyExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return render_error(
+                "release",
+                json,
+                "current_directory",
+                &error.to_string(),
+                false,
+            );
+        }
+    };
+    match release_claim(
+        &SystemRunner,
+        &cwd,
+        arguments.issue,
+        arguments.reason.into(),
+    ) {
+        Ok(report) => {
+            if json {
+                write_json(&ReleaseEnvelope {
+                    schema_version: SCHEMA_VERSION,
+                    command: "release",
+                    status: "success",
+                    release: &report,
+                    warnings: &[],
+                });
+            } else if report.already_released {
+                let _ = writeln!(
+                    io::stdout().lock(),
+                    "Issue #{} generation {} is already released",
+                    report.issue,
+                    &report.claim_id.to_string()[..8]
+                );
+            } else {
+                let _ = writeln!(
+                    io::stdout().lock(),
+                    "Released issue #{} generation {}",
+                    report.issue,
+                    &report.claim_id.to_string()[..8]
+                );
+            }
+            EnvoyExitCode::Success
+        }
+        Err(error) => render_lifecycle_error("release", json, &error),
+    }
+}
+
+fn render_lifecycle_error(
+    command: &'static str,
+    json: bool,
+    error: &LifecycleError,
+) -> EnvoyExitCode {
+    let refused = error.is_refusal();
+    let code = if refused {
+        "refused"
+    } else {
+        "operational_error"
+    };
+    render_error(command, json, code, &error.to_string(), refused)
+}
+
+fn render_error(
+    command: &'static str,
+    json: bool,
+    code: &'static str,
+    message: &str,
+    refused: bool,
+) -> EnvoyExitCode {
+    if json {
+        let envelope = ErrorEnvelope {
+            schema_version: SCHEMA_VERSION,
+            command,
+            status: if refused { "blocked" } else { "error" },
+            error: ErrorBody { code, message },
+        };
+        write_json(&envelope);
+    } else {
+        let _ = writeln!(io::stderr().lock(), "error: {message}");
+    }
+    if refused {
+        EnvoyExitCode::Blocked
+    } else {
+        EnvoyExitCode::OperationalError
+    }
+}
+
+fn write_json(value: &impl Serialize) {
+    if serde_json::to_writer(io::stdout().lock(), value).is_ok() {
+        let _ = writeln!(io::stdout().lock());
+    }
+}
+
+fn run_stub(command: &'static str, json: bool) -> EnvoyExitCode {
     let message = format!("{command} is not implemented yet");
 
-    if cli.json {
+    if json {
         let envelope = ErrorEnvelope {
             schema_version: SCHEMA_VERSION,
             command,

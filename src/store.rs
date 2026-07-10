@@ -90,6 +90,92 @@ impl Store {
         Ok(claims)
     }
 
+    pub fn list_releases(&self, issue: NonZeroU64) -> Result<Vec<ReleaseMarker>, StoreError> {
+        let directory = self.release_issue_directory(issue);
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(StoreError::Io {
+                    action: "list release generations",
+                    path: directory,
+                    source,
+                });
+            }
+        };
+
+        let mut releases = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| StoreError::Io {
+                action: "read release directory entry",
+                path: directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let release = read_release(&path)?;
+            validate_release_location(&path, issue, &release)?;
+            releases.push(release);
+        }
+        releases.sort_by(|left, right| {
+            left.released_at
+                .cmp(&right.released_at)
+                .then_with(|| left.claim_id.cmp(&right.claim_id))
+        });
+        Ok(releases)
+    }
+
+    pub fn active_claims(&self) -> Result<Vec<Claim>, StoreError> {
+        let claims_root = self.root.join("claims");
+        let entries = match fs::read_dir(&claims_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(StoreError::Io {
+                    action: "list claim issues",
+                    path: claims_root,
+                    source,
+                });
+            }
+        };
+        let mut active = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| StoreError::Io {
+                action: "read claim issue entry",
+                path: claims_root.clone(),
+                source,
+            })?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Some(issue) = entry
+                .file_name()
+                .to_str()
+                .and_then(|value| value.parse::<NonZeroU64>().ok())
+            else {
+                continue;
+            };
+            let releases = self.list_releases(issue)?;
+            let released = releases
+                .iter()
+                .map(|release| release.claim_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            active.extend(
+                self.list_claims(issue)?
+                    .into_iter()
+                    .filter(|claim| !released.contains(&claim.claim_id)),
+            );
+        }
+        active.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.claim_id.cmp(&right.claim_id))
+        });
+        Ok(active)
+    }
+
     pub fn read_operation(
         &self,
         operation_id: Uuid,
@@ -175,6 +261,34 @@ impl LockedStore<'_> {
         let path = self.store.operation_path(operation.operation_id);
         PreparedAtomicWrite::json(&path, operation)?.replace()?;
         Ok(path)
+    }
+
+    pub fn remove_operation(&self, operation_id: Uuid) -> Result<(), StoreError> {
+        let path = self.store.operation_path(operation_id);
+        match fs::remove_file(&path) {
+            Ok(()) => sync_directory(
+                path.parent()
+                    .expect("operation path always has a parent directory"),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::Io {
+                action: "remove operation record",
+                path,
+                source,
+            }),
+        }
+    }
+
+    pub fn active_claims(&self) -> Result<Vec<Claim>, StoreError> {
+        self.store.active_claims()
+    }
+
+    pub fn list_claims(&self, issue: NonZeroU64) -> Result<Vec<Claim>, StoreError> {
+        self.store.list_claims(issue)
+    }
+
+    pub fn list_releases(&self, issue: NonZeroU64) -> Result<Vec<ReleaseMarker>, StoreError> {
+        self.store.list_releases(issue)
     }
 }
 
@@ -291,6 +405,19 @@ fn read_claim(path: &Path) -> Result<Claim, StoreError> {
     Claim::from_value(value).map_err(StoreError::Model)
 }
 
+fn read_release(path: &Path) -> Result<ReleaseMarker, StoreError> {
+    let bytes = fs::read(path).map_err(|source| StoreError::Io {
+        action: "read release generation",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|source| StoreError::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    ReleaseMarker::from_value(value).map_err(StoreError::Model)
+}
+
 fn validate_claim_location(
     path: &Path,
     issue: NonZeroU64,
@@ -302,6 +429,22 @@ fn validate_claim_location(
         return Err(StoreError::LocationMismatch {
             path: path.to_path_buf(),
             message: "claim issue or claim_id does not match its storage path".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_release_location(
+    path: &Path,
+    issue: NonZeroU64,
+    release: &ReleaseMarker,
+) -> Result<(), StoreError> {
+    let filename = path.file_stem().and_then(|value| value.to_str());
+    let expected_filename = release.claim_id.to_string();
+    if release.issue != issue || filename != Some(expected_filename.as_str()) {
+        return Err(StoreError::LocationMismatch {
+            path: path.to_path_buf(),
+            message: "release issue or claim_id does not match its storage path".to_owned(),
         });
     }
     Ok(())

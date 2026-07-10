@@ -24,6 +24,15 @@ impl<'a, R: CommandRunner> GitCli<'a, R> {
     {
         run_cli(self.runner, "git", cwd, args)
     }
+
+    pub fn attempt<I, S>(&self, cwd: &Path, args: I) -> Result<CommandOutput, RunnerError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let spec = CommandSpec::new("git").with_args(args).in_directory(cwd);
+        self.runner.run(&spec)
+    }
 }
 
 pub struct GithubCli<'a, R: CommandRunner> {
@@ -133,14 +142,31 @@ impl RepositoryContext {
             })?;
         let main_worktree = canonical_existing(PathBuf::from(main_worktree))?;
 
-        let remote_output = git.run(cwd, ["remote", "get-url", remote_name])?;
-        let remote_url = text_from_utf8_output(
-            &remote_output.stdout,
-            &format!("git remote get-url {remote_name}"),
-        )
-        .map_err(RepositoryError::InvalidOutput)?
-        .to_owned();
-        let repository = repository_slug(&remote_url)?;
+        let (remote_url, repository) = match git.run(cwd, ["remote", "get-url", remote_name]) {
+            Ok(remote_output) => {
+                let remote_url = text_from_utf8_output(
+                    &remote_output.stdout,
+                    &format!("git remote get-url {remote_name}"),
+                )
+                .map_err(RepositoryError::InvalidOutput)?
+                .to_owned();
+                let repository = repository_slug(&remote_url)?;
+                (remote_url, repository)
+            }
+            Err(CliCommandError::Failed { .. }) => {
+                let name = main_worktree
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        RepositoryError::InvalidOutput(
+                            "main worktree does not have a usable repository name".to_owned(),
+                        )
+                    })?;
+                (String::new(), format!("local/{name}"))
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         Ok(Self {
             repository,
@@ -155,14 +181,38 @@ impl RepositoryContext {
     pub fn store_root(&self) -> PathBuf {
         self.common_dir.join("envoy")
     }
+
+    pub fn discover_common_dir(cwd: &Path) -> Result<PathBuf, RepositoryError> {
+        Self::discover_common_dir_with_runner(&SystemRunner, cwd)
+    }
+
+    pub fn discover_common_dir_with_runner<R: CommandRunner>(
+        runner: &R,
+        cwd: &Path,
+    ) -> Result<PathBuf, RepositoryError> {
+        let output = GitCli::new(runner).run(
+            cwd,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        canonical_existing(
+            path_from_utf8_output(
+                &output.stdout,
+                "git rev-parse --path-format=absolute --git-common-dir",
+            )
+            .map_err(RepositoryError::InvalidOutput)?,
+        )
+    }
 }
 
-fn canonical_existing(path: PathBuf) -> Result<PathBuf, RepositoryError> {
+pub(crate) fn canonical_existing(path: PathBuf) -> Result<PathBuf, RepositoryError> {
     path.canonicalize()
+        .map(without_windows_verbatim_prefix)
         .map_err(|source| RepositoryError::Canonicalize { path, source })
 }
 
 fn repository_slug(remote_url: &str) -> Result<String, RepositoryError> {
+    let normalized = remote_url.replace('\\', "/");
+    let remote_url = normalized.as_str();
     let path = if let Some((_, path)) = remote_url.rsplit_once(':') {
         if remote_url.contains("://") {
             remote_url
@@ -190,6 +240,19 @@ fn repository_slug(remote_url: &str) -> Result<String, RepositoryError> {
     Ok(format!("{owner}/{repo}"))
 }
 
+fn without_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(value) = path.to_str() else {
+        return path;
+    };
+    if let Some(value) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{value}"))
+    } else if let Some(value) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(value)
+    } else {
+        path
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RepositoryError {
     #[error(transparent)]
@@ -206,7 +269,9 @@ pub enum RepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::repository_slug;
+    use std::path::PathBuf;
+
+    use super::{repository_slug, without_windows_verbatim_prefix};
 
     #[test]
     fn repository_slug_supports_common_github_remote_forms() {
@@ -220,5 +285,25 @@ mod tests {
                 "z-a-f/gh-envoy"
             );
         }
+    }
+
+    #[test]
+    fn repository_slug_supports_windows_local_remote_paths() {
+        assert_eq!(
+            repository_slug(r"C:\Users\runner\fixture\remote.git").expect("valid local remote"),
+            "fixture/remote"
+        );
+    }
+
+    #[test]
+    fn git_paths_drop_windows_verbatim_prefixes() {
+        assert_eq!(
+            without_windows_verbatim_prefix(PathBuf::from(r"\\?\C:\work\fixture")),
+            PathBuf::from(r"C:\work\fixture")
+        );
+        assert_eq!(
+            without_windows_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\fixture")),
+            PathBuf::from(r"\\server\share\fixture")
+        );
     }
 }

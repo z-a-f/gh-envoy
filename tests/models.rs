@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use gh_envoy::model::{Claim, OperationPhase, OperationRecord, ReleaseMarker};
+use gh_envoy::model::{Claim, OperationPhase, OperationRecord, ReleaseMarker, ReleaseReport};
 
 #[test]
 fn claim_round_trips_the_normative_schema() {
@@ -82,6 +82,23 @@ fn release_and_every_operation_phase_are_representable() {
     }
 
     assert_eq!(OperationPhase::CleanupPending.as_str(), "cleanup_pending");
+}
+
+#[test]
+fn marker_only_release_report_exposes_explicit_cleanup_state() {
+    let claim_id = uuid::Uuid::new_v4();
+    let report = ReleaseReport::marker_only(
+        std::num::NonZeroU64::new(7).expect("positive issue"),
+        claim_id,
+        true,
+    );
+    let value = serde_json::to_value(report).expect("serialize release report");
+
+    assert_eq!(value["claim_id"], claim_id.to_string());
+    assert_eq!(value["already_released"], true);
+    assert_eq!(value["worktree_deleted"], false);
+    assert_eq!(value["branch_deleted"], false);
+    assert_eq!(value["cleanup_pending"], false);
 }
 
 #[test]

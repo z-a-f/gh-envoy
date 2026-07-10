@@ -20,16 +20,14 @@ fn help_identifies_the_github_extension_entrypoint() {
 }
 
 #[test]
-fn command_stubs_fail_explicitly_without_creating_store_state() {
+fn remaining_command_stubs_fail_explicitly_without_creating_store_state() {
     let repository = TempDir::new().expect("temporary repository");
     run_git(repository.path(), &["init", "-q"]);
 
     for arguments in [
-        vec!["claim", "1"],
         vec!["status"],
         vec!["doctor", "1"],
         vec!["doctor", "--stack", "1"],
-        vec!["release", "1"],
     ] {
         let output = envoy()
             .current_dir(repository.path())
@@ -50,14 +48,14 @@ fn command_stubs_fail_explicitly_without_creating_store_state() {
 
 #[test]
 fn json_mode_is_global_and_machine_readable() {
-    for arguments in [vec!["--json", "claim", "7"], vec!["claim", "7", "--json"]] {
+    for arguments in [vec!["--json", "status"], vec!["status", "--json"]] {
         let output = envoy().args(arguments).output().expect("run JSON stub");
 
         assert_eq!(output.status.code(), Some(3));
         assert!(output.stderr.is_empty());
         let value: Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
         assert_eq!(value["schema_version"], "0.1");
-        assert_eq!(value["command"], "claim");
+        assert_eq!(value["command"], "status");
         assert_eq!(value["status"], "error");
         assert_eq!(value["error"]["code"], "not_implemented");
     }
