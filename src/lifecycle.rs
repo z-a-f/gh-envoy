@@ -12,7 +12,7 @@ use crate::config::{Config, ConfigError};
 use crate::git::{CliCommandError, GitCli, RepositoryContext, RepositoryError, canonical_existing};
 use crate::model::{
     Claim, DeclaredScope, OperationKind, OperationPhase, OperationRecord, ReleaseMarker,
-    ReleaseReason, ReleaseReport, SCHEMA_VERSION,
+    ReleaseReason, ReleaseReport, SCHEMA_VERSION, WaitForRef,
 };
 use crate::store::{LockedStore, Store, StoreError};
 
@@ -22,20 +22,40 @@ pub struct ClaimOutcome {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClaimOptions {
+    pub branch: Option<String>,
+    pub worktree: Option<PathBuf>,
+    pub onto: Option<NonZeroU64>,
+    pub after: Vec<NonZeroU64>,
+    pub allowed_paths: Vec<String>,
+    pub disallowed_paths: Vec<String>,
+    pub note: Option<String>,
+}
+
 pub fn claim_issue<R: CommandRunner>(
     runner: &R,
     cwd: &Path,
     issue: NonZeroU64,
 ) -> Result<ClaimOutcome, LifecycleError> {
+    claim_issue_with_options(runner, cwd, issue, ClaimOptions::default())
+}
+
+pub fn claim_issue_with_options<R: CommandRunner>(
+    runner: &R,
+    cwd: &Path,
+    issue: NonZeroU64,
+    options: ClaimOptions,
+) -> Result<ClaimOutcome, LifecycleError> {
+    validate_relationship_arguments(issue, &options)?;
     let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
     let config = Config::load(&common_dir)?;
     let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
     let git = GitCli::new(runner);
-    let base = resolve_base(&git, &repository, &config)?;
     let claim_id = Uuid::new_v4();
     let operation_id = Uuid::new_v4();
     let suffix = short_id(claim_id);
-    let branch = format!("envoy/issue-{}-{suffix}", issue.get());
+    let generated_branch = format!("envoy/issue-{}-{suffix}", issue.get());
     let repository_name = repository
         .repository
         .rsplit_once('/')
@@ -48,16 +68,69 @@ pub fn claim_issue<R: CommandRunner>(
             .ok_or_else(|| LifecycleError::InvalidState("main worktree has no parent".to_owned()))?
             .to_path_buf(),
     };
-    let worktree = worktree_root.join(format!("{repository_name}-issue-{}-{suffix}", issue.get()));
-    if !worktree.is_absolute() {
+    let generated_worktree =
+        worktree_root.join(format!("{repository_name}-issue-{}-{suffix}", issue.get()));
+    if !generated_worktree.is_absolute() {
         return Err(LifecycleError::InvalidState(
             "generated worktree path is not absolute".to_owned(),
         ));
     }
+    let standalone_base = if options.onto.is_none() {
+        Some(resolve_base(&git, &repository, &config)?)
+    } else {
+        None
+    };
 
     let store = Store::new(repository.store_root());
     let locked = store.lock()?;
-    reserve(&locked, issue, &branch, &worktree)?;
+    let active = locked.active_claims()?;
+    let (base, base_issue, base_claim_id) = if let Some(parent_issue) = options.onto {
+        let parent = unique_active_claim(&active, parent_issue)?.ok_or_else(|| {
+            LifecycleError::Refused(format!(
+                "--onto requires an active local claim for issue {}",
+                parent_issue.get()
+            ))
+        })?;
+        let sha = resolve_local_branch_tip(&git, &repository.main_worktree, &parent.branch)?;
+        (
+            ResolvedBase {
+                remote: parent.base_remote.clone(),
+                reference: parent.branch.clone(),
+                sha,
+                warnings: Vec::new(),
+            },
+            Some(parent.issue),
+            Some(parent.claim_id),
+        )
+    } else {
+        (
+            standalone_base.expect("unstacked claims resolve their base before locking"),
+            None,
+            None,
+        )
+    };
+    let wait_for = options
+        .after
+        .iter()
+        .map(|dependency| {
+            unique_active_claim(&active, *dependency).map(|claim| WaitForRef {
+                issue: *dependency,
+                claim_id: claim.map(|claim| claim.claim_id),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let target = resolve_claim_target(
+        &git,
+        &repository,
+        options.branch.as_deref(),
+        options.worktree.as_deref(),
+        &generated_branch,
+        &generated_worktree,
+    )?;
+    if target.adopted_branch {
+        require_ancestor(&git, &repository.main_worktree, &base.sha, &target.branch)?;
+    }
+    reserve_active(&active, issue, &target.branch, &target.worktree)?;
 
     let mut operation = OperationRecord {
         schema_version: SCHEMA_VERSION.to_owned(),
@@ -65,91 +138,120 @@ pub fn claim_issue<R: CommandRunner>(
         kind: OperationKind::Claim,
         claim_id,
         issue,
-        branch: branch.clone(),
-        worktree: worktree.clone(),
+        branch: target.branch.clone(),
+        worktree: target.worktree.clone(),
         phase: OperationPhase::Reserved,
         started_at: Utc::now(),
     };
     locked.write_operation(&operation)?;
 
-    if let Err(error) = git.run(
-        &repository.main_worktree,
-        ["branch", branch.as_str(), base.sha.as_str()],
-    ) {
-        locked.remove_operation(operation_id)?;
-        return Err(error.into());
-    }
-    operation.phase = OperationPhase::BranchCreated;
-    if let Err(error) = locked.write_operation(&operation) {
-        return rollback_failure(
-            &git,
+    let mut created_branch = false;
+    let mut created_worktree = false;
+    if !target.adopted_branch {
+        if let Err(error) = git.run(
             &repository.main_worktree,
-            &locked,
-            &mut operation,
-            false,
-            error.into(),
-        );
-    }
-
-    if let Some(parent) = worktree.parent()
-        && let Err(source) = fs::create_dir_all(parent)
-    {
-        return rollback_failure(
-            &git,
-            &repository.main_worktree,
-            &locked,
-            &mut operation,
-            false,
-            LifecycleError::Io {
-                action: "create worktree root",
-                path: parent.to_path_buf(),
-                source,
-            },
-        );
-    }
-    if let Err(error) = git.run(
-        &repository.main_worktree,
-        [
-            OsString::from("worktree"),
-            OsString::from("add"),
-            worktree.as_os_str().to_owned(),
-            OsString::from(&branch),
-        ],
-    ) {
-        return rollback_failure(
-            &git,
-            &repository.main_worktree,
-            &locked,
-            &mut operation,
-            false,
-            error.into(),
-        );
-    }
-    operation.phase = OperationPhase::WorktreeCreated;
-    if let Err(error) = locked.write_operation(&operation) {
-        return rollback_failure(
-            &git,
-            &repository.main_worktree,
-            &locked,
-            &mut operation,
-            true,
-            error.into(),
-        );
-    }
-
-    let canonical_worktree = match canonical_worktree(&git, &repository.main_worktree, &branch) {
-        Ok(path) => path,
-        Err(error) => {
+            ["branch", target.branch.as_str(), base.sha.as_str()],
+        ) {
+            locked.remove_operation(operation_id)?;
+            return Err(error.into());
+        }
+        created_branch = true;
+        operation.phase = OperationPhase::BranchCreated;
+        if let Err(error) = locked.write_operation(&operation) {
             return rollback_failure(
                 &git,
                 &repository.main_worktree,
                 &locked,
                 &mut operation,
-                true,
-                error,
+                created_branch,
+                created_worktree,
+                error.into(),
             );
         }
-    };
+    }
+
+    if !target.adopted_worktree {
+        if let Some(parent) = target.worktree.parent()
+            && let Err(source) = fs::create_dir_all(parent)
+        {
+            return rollback_failure(
+                &git,
+                &repository.main_worktree,
+                &locked,
+                &mut operation,
+                created_branch,
+                created_worktree,
+                LifecycleError::Io {
+                    action: "create worktree root",
+                    path: parent.to_path_buf(),
+                    source,
+                },
+            );
+        }
+        if let Err(error) = git.run(
+            &repository.main_worktree,
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("--"),
+                target.worktree.as_os_str().to_owned(),
+                OsString::from(&target.branch),
+            ],
+        ) {
+            return rollback_failure(
+                &git,
+                &repository.main_worktree,
+                &locked,
+                &mut operation,
+                created_branch,
+                created_worktree,
+                error.into(),
+            );
+        }
+        created_worktree = true;
+        operation.phase = OperationPhase::WorktreeCreated;
+        if let Err(error) = locked.write_operation(&operation) {
+            return rollback_failure(
+                &git,
+                &repository.main_worktree,
+                &locked,
+                &mut operation,
+                created_branch,
+                created_worktree,
+                error.into(),
+            );
+        }
+    }
+
+    let canonical_worktree =
+        match canonical_worktree(&git, &repository.main_worktree, &target.branch) {
+            Ok(path) => path,
+            Err(error) => {
+                return rollback_failure(
+                    &git,
+                    &repository.main_worktree,
+                    &locked,
+                    &mut operation,
+                    created_branch,
+                    created_worktree,
+                    error,
+                );
+            }
+        };
+    if target.adopted_worktree && canonical_worktree != target.worktree {
+        return rollback_failure(
+            &git,
+            &repository.main_worktree,
+            &locked,
+            &mut operation,
+            created_branch,
+            created_worktree,
+            LifecycleError::Refused(format!(
+                "branch {:?} is no longer attached to requested worktree {:?}",
+                target.branch, target.worktree
+            )),
+        );
+    }
     operation.worktree = canonical_worktree.clone();
     let claim = Claim {
         schema_version: SCHEMA_VERSION.to_owned(),
@@ -157,16 +259,19 @@ pub fn claim_issue<R: CommandRunner>(
         repo: repository.repository,
         issue,
         title: None,
-        branch,
+        branch: target.branch,
         worktree: canonical_worktree,
-        base_remote: config.base_remote,
+        base_remote: base.remote,
         base_ref: base.reference,
         base_sha: base.sha,
-        base_issue: None,
-        base_claim_id: None,
-        wait_for: Vec::new(),
-        declared_scope: Some(DeclaredScope::default()),
-        note: None,
+        base_issue,
+        base_claim_id,
+        wait_for,
+        declared_scope: Some(DeclaredScope {
+            allowed_paths: options.allowed_paths,
+            disallowed_paths: options.disallowed_paths,
+        }),
+        note: options.note,
         created_at: Utc::now(),
     };
     if let Err(error) = locked.create_claim(&claim) {
@@ -175,7 +280,8 @@ pub fn claim_issue<R: CommandRunner>(
             &repository.main_worktree,
             &locked,
             &mut operation,
-            true,
+            created_branch,
+            created_worktree,
             error.into(),
         );
     }
@@ -240,13 +346,241 @@ pub fn release_claim<R: CommandRunner>(
     }
 }
 
-fn reserve(
-    store: &LockedStore<'_>,
+fn validate_relationship_arguments(
+    issue: NonZeroU64,
+    options: &ClaimOptions,
+) -> Result<(), LifecycleError> {
+    if options.onto == Some(issue) || options.after.contains(&issue) {
+        return Err(LifecycleError::Refused(format!(
+            "issue {} cannot depend on itself",
+            issue.get()
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for dependency in &options.after {
+        if !seen.insert(*dependency) {
+            return Err(LifecycleError::Refused(format!(
+                "issue {} is repeated in --after",
+                dependency.get()
+            )));
+        }
+        if options.onto == Some(*dependency) {
+            return Err(LifecycleError::Refused(format!(
+                "issue {} cannot be used by both --onto and --after",
+                dependency.get()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn unique_active_claim(
+    active: &[Claim],
+    issue: NonZeroU64,
+) -> Result<Option<&Claim>, LifecycleError> {
+    let mut matches = active.iter().filter(|claim| claim.issue == issue);
+    let first = matches.next();
+    if matches.next().is_some() {
+        return Err(LifecycleError::InvalidState(format!(
+            "issue {} has multiple active claim generations",
+            issue.get()
+        )));
+    }
+    Ok(first)
+}
+
+struct ClaimTarget {
+    branch: String,
+    worktree: PathBuf,
+    adopted_branch: bool,
+    adopted_worktree: bool,
+}
+
+struct WorktreeEntry {
+    path: PathBuf,
+    branch: Option<String>,
+}
+
+fn resolve_claim_target<R: CommandRunner>(
+    git: &GitCli<'_, R>,
+    repository: &RepositoryContext,
+    requested_branch: Option<&str>,
+    requested_worktree: Option<&Path>,
+    generated_branch: &str,
+    generated_worktree: &Path,
+) -> Result<ClaimTarget, LifecycleError> {
+    if requested_branch.is_none() && requested_worktree.is_none() {
+        return Ok(ClaimTarget {
+            branch: generated_branch.to_owned(),
+            worktree: generated_worktree.to_path_buf(),
+            adopted_branch: false,
+            adopted_worktree: false,
+        });
+    }
+
+    let entries = list_worktrees(git, &repository.main_worktree)?;
+    let canonical_requested = requested_worktree
+        .map(|path| {
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                repository.current_worktree.join(path)
+            };
+            canonical_existing(path).map_err(|error| LifecycleError::Refused(error.to_string()))
+        })
+        .transpose()?;
+
+    if let Some(branch) = requested_branch {
+        validate_local_branch(git, &repository.main_worktree, branch)?;
+        let registered = entries
+            .iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch));
+        if let Some(worktree) = canonical_requested {
+            let entry = find_worktree_by_path(&entries, &worktree).ok_or_else(|| {
+                LifecycleError::Refused(format!(
+                    "worktree {:?} is not registered with Git",
+                    worktree
+                ))
+            })?;
+            if entry.branch.as_deref() != Some(branch) {
+                return Err(LifecycleError::Refused(format!(
+                    "worktree {:?} is not attached to branch {branch:?}",
+                    worktree
+                )));
+            }
+            return Ok(ClaimTarget {
+                branch: branch.to_owned(),
+                worktree,
+                adopted_branch: true,
+                adopted_worktree: true,
+            });
+        }
+        return Ok(ClaimTarget {
+            branch: branch.to_owned(),
+            worktree: registered
+                .map(canonical_worktree_entry)
+                .transpose()?
+                .unwrap_or_else(|| generated_worktree.to_path_buf()),
+            adopted_branch: true,
+            adopted_worktree: registered.is_some(),
+        });
+    }
+
+    let worktree = canonical_requested.expect("worktree request is present");
+    let entry = find_worktree_by_path(&entries, &worktree).ok_or_else(|| {
+        LifecycleError::Refused(format!(
+            "worktree {:?} is not registered with Git",
+            worktree
+        ))
+    })?;
+    let branch = entry.branch.clone().ok_or_else(|| {
+        LifecycleError::Refused(format!(
+            "worktree {:?} is detached and cannot be adopted",
+            worktree
+        ))
+    })?;
+    validate_local_branch(git, &repository.main_worktree, &branch)?;
+    Ok(ClaimTarget {
+        branch,
+        worktree,
+        adopted_branch: true,
+        adopted_worktree: true,
+    })
+}
+
+fn find_worktree_by_path<'a>(
+    entries: &'a [WorktreeEntry],
+    canonical_path: &Path,
+) -> Option<&'a WorktreeEntry> {
+    entries.iter().find(|entry| {
+        canonical_existing(entry.path.clone()).is_ok_and(|path| path == canonical_path)
+    })
+}
+
+fn canonical_worktree_entry(entry: &WorktreeEntry) -> Result<PathBuf, LifecycleError> {
+    canonical_existing(entry.path.clone())
+        .map_err(|error| LifecycleError::Refused(error.to_string()))
+}
+
+fn list_worktrees<R: CommandRunner>(
+    git: &GitCli<'_, R>,
+    cwd: &Path,
+) -> Result<Vec<WorktreeEntry>, LifecycleError> {
+    let output = git.run(cwd, ["worktree", "list", "--porcelain"])?;
+    let text = text_from_utf8_output(&output.stdout, "git worktree list --porcelain")
+        .map_err(LifecycleError::InvalidState)?;
+    text.split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+        .map(|block| {
+            let mut path = None;
+            let mut branch = None;
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("worktree ") {
+                    path = Some(PathBuf::from(value));
+                } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                    branch = Some(value.to_owned());
+                }
+            }
+            let path = path.ok_or_else(|| {
+                LifecycleError::InvalidState(
+                    "git worktree list reported an entry without a path".to_owned(),
+                )
+            })?;
+            Ok(WorktreeEntry { path, branch })
+        })
+        .collect()
+}
+
+fn validate_local_branch<R: CommandRunner>(
+    git: &GitCli<'_, R>,
+    cwd: &Path,
+    branch: &str,
+) -> Result<(), LifecycleError> {
+    let format = git.attempt(cwd, ["check-ref-format", "--branch", branch])?;
+    if format.exit_code != Some(0) {
+        return Err(LifecycleError::Refused(format!(
+            "branch {branch:?} is not a valid local branch name"
+        )));
+    }
+    resolve_local_branch_tip(git, cwd, branch).map(|_| ())
+}
+
+fn resolve_local_branch_tip<R: CommandRunner>(
+    git: &GitCli<'_, R>,
+    cwd: &Path,
+    branch: &str,
+) -> Result<String, LifecycleError> {
+    let reference = format!("refs/heads/{branch}^{{commit}}");
+    resolve_optional(git, cwd, &reference)?
+        .ok_or_else(|| LifecycleError::Refused(format!("local branch {branch:?} does not exist")))
+}
+
+fn require_ancestor<R: CommandRunner>(
+    git: &GitCli<'_, R>,
+    cwd: &Path,
+    base_sha: &str,
+    branch: &str,
+) -> Result<(), LifecycleError> {
+    let branch_tip = resolve_local_branch_tip(git, cwd, branch)?;
+    let output = git.attempt(cwd, ["merge-base", "--is-ancestor", base_sha, &branch_tip])?;
+    match output.exit_code {
+        Some(0) => Ok(()),
+        Some(1) => Err(LifecycleError::Refused(format!(
+            "branch {branch:?} does not contain captured base {base_sha}"
+        ))),
+        _ => Err(LifecycleError::InvalidState(format!(
+            "git could not validate ancestry for branch {branch:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
+}
+
+fn reserve_active(
+    active: &[Claim],
     issue: NonZeroU64,
     branch: &str,
     worktree: &Path,
 ) -> Result<(), LifecycleError> {
-    let active = store.active_claims()?;
     if let Some(claim) = active.iter().find(|claim| claim.issue == issue) {
         return Err(LifecycleError::AlreadyClaimed {
             issue,
@@ -273,6 +607,7 @@ fn rollback_failure<R: CommandRunner, T>(
     repository: &Path,
     store: &LockedStore<'_>,
     operation: &mut OperationRecord,
+    branch_created: bool,
     worktree_created: bool,
     original: LifecycleError,
 ) -> Result<T, LifecycleError> {
@@ -290,7 +625,9 @@ fn rollback_failure<R: CommandRunner, T>(
     {
         failures.push(error.to_string());
     }
-    if let Err(error) = git.run(repository, ["branch", "-D", operation.branch.as_str()]) {
+    if branch_created
+        && let Err(error) = git.run(repository, ["branch", "-D", operation.branch.as_str()])
+    {
         failures.push(error.to_string());
     }
     if failures.is_empty() {
@@ -307,6 +644,7 @@ fn rollback_failure<R: CommandRunner, T>(
 }
 
 struct ResolvedBase {
+    remote: String,
     reference: String,
     sha: String,
     warnings: Vec<String>,
@@ -356,6 +694,7 @@ fn resolve_base<R: CommandRunner>(
         sha
     };
     Ok(ResolvedBase {
+        remote: config.base_remote.clone(),
         reference: base_ref,
         sha,
         warnings,
@@ -446,6 +785,8 @@ pub enum LifecycleError {
     AlreadyClaimed { issue: NonZeroU64, claim_id: Uuid },
     #[error("claim reservation refused: {0}")]
     Reserved(String),
+    #[error("claim refused: {0}")]
+    Refused(String),
     #[error("issue {0} has no claim to release")]
     NoClaim(NonZeroU64),
     #[error("could not resolve base {remote}/{reference} from a remote-tracking or local branch")]
@@ -467,7 +808,7 @@ impl LifecycleError {
     pub fn is_refusal(&self) -> bool {
         matches!(
             self,
-            Self::AlreadyClaimed { .. } | Self::Reserved(_) | Self::NoClaim(_)
+            Self::AlreadyClaimed { .. } | Self::Reserved(_) | Self::Refused(_) | Self::NoClaim(_)
         )
     }
 }
