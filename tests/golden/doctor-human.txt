@@ -1,0 +1,13 @@
+Doctor report for local/fixture issue #12
+
+Overall: error
+Gates: integrity=error publish=ok merge=blocked
+
+Checks:
+PASS  [integrity] Claim schema: claim schema is valid
+SKIP  [publish] Remote verification: remote checks were not requested
+FAIL  [merge] Merge overlap: claim overlaps an unrelated active claim
+ERROR [integrity] Operation journal: operation journal could not be read
+
+Recommendations:
+- repair the operation journal before continuing
