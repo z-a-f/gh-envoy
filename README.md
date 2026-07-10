@@ -33,7 +33,22 @@ When `gh-envoy` is installed on `PATH`, GitHub CLI exposes it as:
 gh envoy --help
 ```
 
-Slice 1 establishes command dispatch for `claim`, `status`, `doctor`, and `release`. These commands intentionally report `not_implemented` until their owning vertical slices land.
+Fresh, unstacked claims provision an isolated branch and worktree from an exact captured base SHA:
+
+```sh
+gh envoy claim 123
+```
+
+Envoy first attempts to refresh the configured remote base. When the remote is unavailable, it can use an existing remote-tracking ref or local base branch and reports the unverified fallback explicitly. Claim state is journaled under the shared Git common directory so interrupted operations remain inspectable.
+
+Marker-only release is idempotent and preserves the generation's claim file, branch, and worktree:
+
+```sh
+gh envoy release 123
+gh envoy release 123 --reason merged
+```
+
+`status` and `doctor` remain explicit `not_implemented` placeholders until their owning slices land.
 
 ## Architecture
 
