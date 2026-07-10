@@ -100,6 +100,32 @@ fn repository_discovery_reports_git_failures() {
 }
 
 #[test]
+fn repository_without_a_remote_uses_a_local_identity() {
+    let fixture = RepositoryFixture::new();
+
+    let context = RepositoryContext::discover(fixture.root.path(), "missing")
+        .expect("local repository discovery succeeds");
+
+    assert_eq!(
+        context.repository,
+        format!(
+            "local/{}",
+            fixture
+                .root
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("fixture directory name")
+        )
+    );
+    assert!(context.remote_url.is_empty());
+    assert_eq!(
+        RepositoryContext::discover_common_dir(fixture.root.path()).unwrap(),
+        context.common_dir
+    );
+}
+
+#[test]
 fn system_runner_reports_program_start_failures() {
     let error = SystemRunner
         .run(&CommandSpec::new("envoy-program-that-does-not-exist"))

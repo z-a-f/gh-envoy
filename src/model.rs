@@ -96,6 +96,30 @@ pub struct ReleaseMarker {
     pub released_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseReport {
+    pub issue: NonZeroU64,
+    pub claim_id: Uuid,
+    pub already_released: bool,
+    pub worktree_deleted: bool,
+    pub branch_deleted: bool,
+    pub cleanup_pending: bool,
+}
+
+impl ReleaseReport {
+    pub fn marker_only(issue: NonZeroU64, claim_id: Uuid, already_released: bool) -> Self {
+        Self {
+            issue,
+            claim_id,
+            already_released,
+            worktree_deleted: false,
+            branch_deleted: false,
+            cleanup_pending: false,
+        }
+    }
+}
+
 impl ReleaseMarker {
     pub fn from_value(value: Value) -> Result<Self, ModelError> {
         decode_and_validate(value)

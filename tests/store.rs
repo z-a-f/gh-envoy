@@ -87,6 +87,43 @@ fn operation_updates_replace_whole_json_and_release_markers_are_immutable() {
     assert_eq!(persisted.phase, OperationPhase::WorktreeCreated);
     let bytes = fs::read(store.operation_path(operation_id)).expect("read operation JSON");
     serde_json::from_slice::<Value>(&bytes).expect("operation is complete JSON");
+
+    {
+        let locked = store.lock().expect("lock store");
+        locked
+            .remove_operation(operation_id)
+            .expect("remove operation");
+        locked
+            .remove_operation(operation_id)
+            .expect("repeated removal is harmless");
+    }
+    assert!(store.read_operation(operation_id).unwrap().is_none());
+}
+
+#[test]
+fn active_claims_exclude_released_generations() {
+    let common_dir = TempDir::new().expect("temporary common directory");
+    let store = Store::new(common_dir.path().join("envoy"));
+    let first = claim(common_dir.path(), Uuid::new_v4());
+    let second = claim(common_dir.path(), Uuid::new_v4());
+    let marker = ReleaseMarker {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        repo: first.repo.clone(),
+        issue: first.issue,
+        claim_id: first.claim_id,
+        reason: ReleaseReason::Manual,
+        released_at: Utc::now(),
+    };
+
+    {
+        let locked = store.lock().expect("lock store");
+        locked.create_claim(&first).expect("write first claim");
+        locked.create_release(&marker).expect("release first claim");
+        locked.create_claim(&second).expect("write second claim");
+    }
+
+    assert_eq!(store.list_releases(first.issue).unwrap(), vec![marker]);
+    assert_eq!(store.active_claims().unwrap(), vec![second]);
 }
 
 #[test]

@@ -24,6 +24,15 @@ impl<'a, R: CommandRunner> GitCli<'a, R> {
     {
         run_cli(self.runner, "git", cwd, args)
     }
+
+    pub fn attempt<I, S>(&self, cwd: &Path, args: I) -> Result<CommandOutput, RunnerError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let spec = CommandSpec::new("git").with_args(args).in_directory(cwd);
+        self.runner.run(&spec)
+    }
 }
 
 pub struct GithubCli<'a, R: CommandRunner> {
@@ -133,14 +142,31 @@ impl RepositoryContext {
             })?;
         let main_worktree = canonical_existing(PathBuf::from(main_worktree))?;
 
-        let remote_output = git.run(cwd, ["remote", "get-url", remote_name])?;
-        let remote_url = text_from_utf8_output(
-            &remote_output.stdout,
-            &format!("git remote get-url {remote_name}"),
-        )
-        .map_err(RepositoryError::InvalidOutput)?
-        .to_owned();
-        let repository = repository_slug(&remote_url)?;
+        let (remote_url, repository) = match git.run(cwd, ["remote", "get-url", remote_name]) {
+            Ok(remote_output) => {
+                let remote_url = text_from_utf8_output(
+                    &remote_output.stdout,
+                    &format!("git remote get-url {remote_name}"),
+                )
+                .map_err(RepositoryError::InvalidOutput)?
+                .to_owned();
+                let repository = repository_slug(&remote_url)?;
+                (remote_url, repository)
+            }
+            Err(CliCommandError::Failed { .. }) => {
+                let name = main_worktree
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        RepositoryError::InvalidOutput(
+                            "main worktree does not have a usable repository name".to_owned(),
+                        )
+                    })?;
+                (String::new(), format!("local/{name}"))
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         Ok(Self {
             repository,
@@ -154,6 +180,27 @@ impl RepositoryContext {
 
     pub fn store_root(&self) -> PathBuf {
         self.common_dir.join("envoy")
+    }
+
+    pub fn discover_common_dir(cwd: &Path) -> Result<PathBuf, RepositoryError> {
+        Self::discover_common_dir_with_runner(&SystemRunner, cwd)
+    }
+
+    pub fn discover_common_dir_with_runner<R: CommandRunner>(
+        runner: &R,
+        cwd: &Path,
+    ) -> Result<PathBuf, RepositoryError> {
+        let output = GitCli::new(runner).run(
+            cwd,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        canonical_existing(
+            path_from_utf8_output(
+                &output.stdout,
+                "git rev-parse --path-format=absolute --git-common-dir",
+            )
+            .map_err(RepositoryError::InvalidOutput)?,
+        )
     }
 }
 
