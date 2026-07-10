@@ -12,6 +12,10 @@ use gh_envoy::store::Store;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+mod support;
+
+use support::assert_same_existing_path;
+
 #[test]
 fn valid_claim_passes_every_local_integrity_check() {
     let fixture = RepositoryFixture::new();
@@ -189,9 +193,13 @@ fn abandoned_generated_worktree_has_safe_exact_recovery_commands() {
             {"program": "git", "args": ["branch", "-d", "--", branch]}
         ])
     );
-    assert_eq!(
-        recovery["remove_journal"],
-        serde_json::json!(fixture.store().operation_path(operation.operation_id))
+    assert_same_existing_path(
+        PathBuf::from(
+            recovery["remove_journal"]
+                .as_str()
+                .expect("journal path string"),
+        ),
+        fixture.store().operation_path(operation.operation_id),
     );
     assert!(
         report

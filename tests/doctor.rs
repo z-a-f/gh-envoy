@@ -6,6 +6,7 @@ use gh_envoy::doctor::{
     redact_doctor_paths, render_doctor_human, rollup_gate,
 };
 use gh_envoy::exit::EnvoyExitCode;
+use tempfile::TempDir;
 
 mod support;
 
@@ -118,6 +119,10 @@ fn human_and_json_doctor_goldens_are_stable() {
 
 #[test]
 fn json_path_redaction_preserves_human_report_source() {
+    let fixture = TempDir::new().expect("temporary path fixture");
+    let worktree = fixture.path().join("feature");
+    let journal = fixture.path().join("main/.git/envoy/operations/op.json");
+    let worktree_text = worktree.to_string_lossy();
     let report = DoctorReport::new(
         subject(),
         vec![
@@ -126,30 +131,38 @@ fn json_path_redaction_preserves_human_report_source() {
                 CheckGate::Integrity,
                 "Operation journal",
                 CheckStatus::Fail,
-                "cleanup /private/repos/feature before continuing",
+                format!("cleanup {worktree_text} before continuing"),
             )
             .with_evidence(serde_json::json!({
-                "worktree": "/private/repos/feature",
+                "worktree": worktree,
                 "recovery": {
                     "commands": [{
                         "program": "git",
-                        "args": ["worktree", "remove", "--", "/private/repos/feature"]
+                        "args": ["worktree", "remove", "--", worktree]
                     }],
-                    "remove_journal": "/private/repos/main/.git/envoy/operations/op.json"
+                    "remove_journal": journal
                 }
             })),
         ],
-        vec!["Run: git worktree remove -- /private/repos/feature".to_owned()],
+        vec![format!("Run: git worktree remove -- {worktree_text}")],
         timestamp(),
     );
 
     let redacted = redact_doctor_paths(&report);
-    let json = serde_json::to_string(&redacted).expect("serialize redacted report");
+    let evidence = redacted.checks[0].evidence.as_ref().expect("evidence");
 
-    assert!(!json.contains("/private/"));
-    assert!(json.contains("…/feature"));
-    assert!(json.contains("…/op.json"));
-    assert!(report.recommendations[0].contains("/private/repos/feature"));
+    assert_eq!(
+        redacted.checks[0].message,
+        "cleanup …/feature before continuing"
+    );
+    assert_eq!(evidence["worktree"], "…/feature");
+    assert_eq!(evidence["recovery"]["commands"][0]["args"][3], "…/feature");
+    assert_eq!(evidence["recovery"]["remove_journal"], "…/op.json");
+    assert_eq!(
+        redacted.recommendations,
+        ["Run: git worktree remove -- …/feature"]
+    );
+    assert!(report.recommendations[0].contains(worktree_text.as_ref()));
 }
 
 #[test]
