@@ -11,6 +11,7 @@ use crate::command::{CommandRunner, RunnerError, text_from_utf8_output};
 use crate::config::{Config, ConfigError};
 use crate::conflict::{normalize_scope_pattern, validate_scope_pattern};
 use crate::git::{CliCommandError, GitCli, RepositoryContext, RepositoryError, canonical_existing};
+use crate::github::{GithubIssueError, GithubIssueObservation, GithubIssueState, observe_issue};
 use crate::model::{
     Claim, DeclaredScope, OperationKind, OperationPhase, OperationRecord, ReleaseMarker,
     ReleaseReason, ReleaseReport, SCHEMA_VERSION, WaitForRef,
@@ -32,6 +33,7 @@ pub struct ClaimOptions {
     pub allowed_paths: Vec<String>,
     pub disallowed_paths: Vec<String>,
     pub note: Option<String>,
+    pub force: bool,
 }
 
 pub fn claim_issue<R: CommandRunner>(
@@ -95,6 +97,31 @@ pub fn claim_issue_with_options<R: CommandRunner>(
     let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
     let config = Config::load(&common_dir)?;
     let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
+    let mut issue_warnings = Vec::new();
+    let mut title = None;
+    if repository.is_github_remote() {
+        match observe_issue(
+            runner,
+            &repository.main_worktree,
+            &repository.repository,
+            issue,
+        )? {
+            GithubIssueObservation::Available(observed) => {
+                title = Some(observed.title);
+                if observed.state == GithubIssueState::Closed {
+                    if !options.force {
+                        return Err(LifecycleError::ClosedIssue(issue));
+                    }
+                    issue_warnings.push(format!(
+                        "claiming closed GitHub issue #{issue} because --force was specified"
+                    ));
+                }
+            }
+            GithubIssueObservation::Unavailable => issue_warnings.push(format!(
+                "GitHub issue #{issue} could not be verified; continuing with unverified local intent"
+            )),
+        }
+    }
     let git = GitCli::new(runner);
     let claim_id = Uuid::new_v4();
     let operation_id = Uuid::new_v4();
@@ -302,7 +329,7 @@ pub fn claim_issue_with_options<R: CommandRunner>(
         claim_id,
         repo: repository.repository,
         issue,
-        title: None,
+        title,
         branch: target.branch,
         worktree: canonical_worktree,
         base_remote: base.remote,
@@ -333,9 +360,10 @@ pub fn claim_issue_with_options<R: CommandRunner>(
     operation.phase = OperationPhase::ClaimCommitted;
     locked.write_operation(&operation)?;
     locked.remove_operation(operation_id)?;
+    issue_warnings.extend(base.warnings);
     Ok(ClaimOutcome {
         claim,
-        warnings: base.warnings,
+        warnings: issue_warnings,
     })
 }
 
@@ -837,6 +865,10 @@ pub enum LifecycleError {
     Git(#[from] CliCommandError),
     #[error(transparent)]
     Runner(#[from] RunnerError),
+    #[error(transparent)]
+    GithubIssue(#[from] GithubIssueError),
+    #[error("issue {0} is closed on GitHub; use --force to claim it anyway")]
+    ClosedIssue(NonZeroU64),
     #[error("issue {issue} is already claimed by generation {claim_id}")]
     AlreadyClaimed { issue: NonZeroU64, claim_id: Uuid },
     #[error("claim reservation refused: {0}")]
@@ -864,7 +896,11 @@ impl LifecycleError {
     pub fn is_refusal(&self) -> bool {
         matches!(
             self,
-            Self::AlreadyClaimed { .. } | Self::Reserved(_) | Self::Refused(_) | Self::NoClaim(_)
+            Self::AlreadyClaimed { .. }
+                | Self::Reserved(_)
+                | Self::Refused(_)
+                | Self::NoClaim(_)
+                | Self::ClosedIssue(_)
         )
     }
 }

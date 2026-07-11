@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Output};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -296,6 +297,159 @@ fn claim_resume_refuses_absent_or_stale_active_claims_without_mutation() {
         .expect("resume mismatched claim");
     assert_eq!(refused.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&refused.stderr).contains("is registered at"));
+
+    let unregistered = RepositoryFixture::with_remote();
+    let claim = run_envoy_json(unregistered.repository(), &["claim", "22", "--json"]);
+    let worktree = claim["claim"]["worktree"].as_str().unwrap();
+    let branch = claim["claim"]["branch"].as_str().unwrap();
+    unregistered.git(&["worktree", "remove", "--", worktree]);
+    unregistered.git(&["branch", "-D", "--", branch]);
+    fs::create_dir_all(worktree).expect("recreate stale claimed worktree path");
+
+    let refused = envoy()
+        .current_dir(unregistered.repository())
+        .args(["claim", "22", "--resume"])
+        .output()
+        .expect("resume claim with unregistered branch");
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not resumable"));
+}
+
+#[test]
+fn github_issue_state_blocks_closed_claims_unless_forced() {
+    let closed = RepositoryFixture::with_remote();
+    closed.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "git@github.com:z-a-f/fixture.git",
+    ]);
+    let runner = GithubIssueRunner::new(Some(0), br#"{"state":"CLOSED","title":"Finished"}"#);
+
+    let error = claim_issue_with_options(
+        &runner,
+        closed.repository(),
+        std::num::NonZeroU64::new(18).unwrap(),
+        ClaimOptions::default(),
+    )
+    .expect_err("closed issue is refused");
+
+    assert!(error.to_string().contains("issue 18 is closed"));
+    assert!(!closed.store_root().exists());
+    assert!(
+        closed
+            .git_stdout(&["branch", "--list", "envoy/issue-18-*"])
+            .is_empty()
+    );
+    runner.assert_single_read_only_issue_call(18);
+
+    let forced = RepositoryFixture::with_remote();
+    forced.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "git@github.com:z-a-f/fixture.git",
+    ]);
+    let runner = GithubIssueRunner::new(Some(0), br#"{"state":"CLOSED","title":"Finished"}"#);
+    let outcome = claim_issue_with_options(
+        &runner,
+        forced.repository(),
+        std::num::NonZeroU64::new(18).unwrap(),
+        ClaimOptions {
+            force: true,
+            ..ClaimOptions::default()
+        },
+    )
+    .expect("forced closed claim succeeds");
+
+    assert_eq!(outcome.claim.title.as_deref(), Some("Finished"));
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("--force"))
+    );
+    runner.assert_single_read_only_issue_call(18);
+}
+
+#[test]
+fn github_open_and_unavailable_issue_observation_remain_claimable() {
+    let open = RepositoryFixture::with_remote();
+    open.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/z-a-f/fixture.git",
+    ]);
+    let runner = GithubIssueRunner::new(Some(0), br#"{"state":"OPEN","title":"Ready"}"#);
+    let outcome = claim_issue_with_options(
+        &runner,
+        open.repository(),
+        std::num::NonZeroU64::new(19).unwrap(),
+        ClaimOptions::default(),
+    )
+    .expect("open issue succeeds");
+    assert_eq!(outcome.claim.title.as_deref(), Some("Ready"));
+    assert!(outcome.warnings.is_empty());
+
+    let offline = RepositoryFixture::with_remote();
+    offline.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/z-a-f/fixture.git",
+    ]);
+    let runner = GithubIssueRunner::new(Some(1), b"");
+    let outcome = claim_issue_with_options(
+        &runner,
+        offline.repository(),
+        std::num::NonZeroU64::new(20).unwrap(),
+        ClaimOptions::default(),
+    )
+    .expect("unavailable GitHub remains claimable");
+    assert_eq!(outcome.claim.title, None);
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("could not be verified"))
+    );
+
+    let unexpected = RepositoryFixture::with_remote();
+    unexpected.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/z-a-f/fixture.git",
+    ]);
+    let runner = GithubIssueRunner::new(Some(0), br#"{"state":"LOCKED","title":"Unexpected"}"#);
+    let error = claim_issue_with_options(
+        &runner,
+        unexpected.repository(),
+        std::num::NonZeroU64::new(21).unwrap(),
+        ClaimOptions::default(),
+    )
+    .expect_err("unknown issue state is rejected");
+    assert!(error.to_string().contains("unknown state \"LOCKED\""));
+    assert!(!unexpected.store_root().exists());
+
+    let malformed = RepositoryFixture::with_remote();
+    malformed.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/z-a-f/fixture.git",
+    ]);
+    let runner = GithubIssueRunner::new(Some(0), b"not JSON");
+    let error = claim_issue_with_options(
+        &runner,
+        malformed.repository(),
+        std::num::NonZeroU64::new(23).unwrap(),
+        ClaimOptions::default(),
+    )
+    .expect_err("malformed successful GitHub response is rejected");
+    assert!(error.to_string().contains("invalid JSON"));
+    assert!(!malformed.store_root().exists());
 }
 
 #[test]
@@ -611,6 +765,66 @@ struct FailingRollbackRunner {
 struct FailCanonicalizationOnceRunner {
     worktree_added: AtomicBool,
     failure_injected: AtomicBool,
+}
+
+struct GithubIssueRunner {
+    gh_output: CommandOutput,
+    gh_calls: Mutex<Vec<CommandSpec>>,
+}
+
+impl GithubIssueRunner {
+    fn new(exit_code: Option<i32>, stdout: &[u8]) -> Self {
+        Self {
+            gh_output: CommandOutput {
+                exit_code,
+                stdout: stdout.to_vec(),
+                stderr: if exit_code == Some(0) {
+                    Vec::new()
+                } else {
+                    b"offline".to_vec()
+                },
+            },
+            gh_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn assert_single_read_only_issue_call(&self, issue: u64) {
+        let calls = self.gh_calls.lock().expect("GitHub calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "gh");
+        assert_eq!(
+            calls[0].args,
+            [
+                "issue",
+                "view",
+                &issue.to_string(),
+                "--repo",
+                "z-a-f/fixture",
+                "--json",
+                "state,title"
+            ]
+        );
+    }
+}
+
+impl CommandRunner for GithubIssueRunner {
+    fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, RunnerError> {
+        if spec.program == "gh" {
+            self.gh_calls
+                .lock()
+                .expect("GitHub calls")
+                .push(spec.clone());
+            return Ok(self.gh_output.clone());
+        }
+        if spec.program == "git" && spec.args.first().is_some_and(|arg| arg == "fetch") {
+            return Ok(CommandOutput {
+                exit_code: Some(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
+        SystemRunner.run(spec)
+    }
 }
 
 impl CommandRunner for FailCanonicalizationOnceRunner {

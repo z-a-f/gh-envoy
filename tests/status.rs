@@ -103,6 +103,10 @@ fn declared_scope_is_visible_before_the_diff_has_changes() {
 
     assert!(human.contains("Overlaps      none (diff-based)"));
     assert!(human.contains("Scope         allow: README.md; deny: .github/**"));
+
+    report.claims[0].claim.declared_scope = Some(DeclaredScope::default());
+    let human = render_status_human(&report);
+    assert!(human.contains("Scope         none"));
 }
 
 #[test]

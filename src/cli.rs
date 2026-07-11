@@ -111,6 +111,13 @@ pub struct ClaimArgs {
         help = "Resume the active local claim and enter its worktree shell"
     )]
     pub resume: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "resume",
+        help = "Allow claiming a closed GitHub issue"
+    )]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -368,6 +375,7 @@ fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
         allowed_paths: arguments.scope,
         disallowed_paths: arguments.disallow,
         note: arguments.note,
+        force: arguments.force,
     };
     match claim_issue_with_options(&SystemRunner, &cwd, arguments.issue, options) {
         Ok(outcome) => {
@@ -639,6 +647,7 @@ mod tests {
                 .is_err()
         );
         assert!(Cli::try_parse_from(["gh-envoy", "claim", "7", "--resume", "--no-cd"]).is_err());
+        assert!(Cli::try_parse_from(["gh-envoy", "claim", "7", "--resume", "--force"]).is_err());
     }
 
     #[test]

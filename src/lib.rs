@@ -5,6 +5,7 @@ pub mod conflict;
 pub mod doctor;
 pub mod exit;
 pub mod git;
+pub mod github;
 pub mod lifecycle;
 pub mod list;
 pub mod model;

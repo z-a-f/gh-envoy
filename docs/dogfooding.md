@@ -56,6 +56,17 @@ gh envoy claim 123 --resume
 
 Resume performs no store or Git mutation. It verifies the recorded branch/worktree association and enters the nested worktree shell. If the claim is absent or stale, resume is blocked and leaves history unchanged; run status or doctor rather than silently creating a replacement generation.
 
+For a recognized GitHub remote, claim performs a read-only issue lookup before creating a branch, worktree, operation journal, or claim file. Open issues proceed normally. Closed issues are blocked:
+
+```sh
+gh envoy claim 123
+# error: issue 123 is closed on GitHub; use --force to claim it anyway
+
+gh envoy claim 123 --force
+```
+
+The forced path emits a warning and records the observed title. `--force` does not bypass ownership, relationship, branch, worktree, or integrity checks. If GitHub cannot be reached or authenticated, Envoy continues with unverified local intent and a warning so offline work remains possible.
+
 During development:
 
 ```sh
@@ -189,10 +200,10 @@ Envoy attempts to refresh the configured base remote for a fresh claim. If the r
 This makes local and offline dogfooding possible, but it changes what is known:
 
 - Local branch, worktree, diff, ownership, and dependency checks still run.
-- GitHub issue existence, title, and pull-request state are not currently observed.
+- Claim observes issue title and open/closed state when GitHub is available; status and doctor do not yet refresh those facts or observe pull requests.
 - An unverified fallback should be reviewed before publishing, especially after a long offline period.
 
-Do not interpret an issue number accepted by `claim` as proof that the GitHub issue exists. Read-only GitHub observation is a future option.
+When the claim lookup is unavailable, do not interpret an accepted issue number as proof that the GitHub issue exists. Broader read-only GitHub observation remains a future option.
 
 ## Scenario 8: recover after interruption or drift
 

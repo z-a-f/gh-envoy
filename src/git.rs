@@ -51,6 +51,15 @@ impl<'a, R: CommandRunner> GithubCli<'a, R> {
     {
         run_cli(self.runner, "gh", cwd, args)
     }
+
+    pub fn attempt<I, S>(&self, cwd: &Path, args: I) -> Result<CommandOutput, RunnerError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let spec = CommandSpec::new("gh").with_args(args).in_directory(cwd);
+        self.runner.run(&spec)
+    }
 }
 
 fn run_cli<I, S, R>(
@@ -180,6 +189,11 @@ impl RepositoryContext {
 
     pub fn store_root(&self) -> PathBuf {
         self.common_dir.join("envoy")
+    }
+
+    pub fn is_github_remote(&self) -> bool {
+        let remote = self.remote_url.to_ascii_lowercase().replace('\\', "/");
+        remote.contains("github.com/") || remote.contains("github.com:")
     }
 
     pub fn discover_common_dir(cwd: &Path) -> Result<PathBuf, RepositoryError> {

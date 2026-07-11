@@ -52,7 +52,7 @@ Choose the claim form that matches the work:
 | Claim inventory | `gh envoy list` | Show every active and released claim generation. |
 | Automation | `gh envoy status --strict --json` | Consume machine-readable output and fail on coordination warnings. |
 
-Current commands are deliberately local and read-only with respect to GitHub. Issue-title and pull-request observation, guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
+Current commands perform no GitHub writes. Claim performs a read-only issue-state lookup when the remote is on GitHub; ongoing issue/PR observation in status and doctor, guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
 
 See the [dogfooding guide](docs/dogfooding.md) for complete workflows, stack and dependency behavior, safety gates, configuration, JSON use, and troubleshooting. The [docs index](docs/README.md) separates operator guidance from the normative [product specification](spec.md).
 
@@ -113,6 +113,7 @@ gh envoy claim 123
 gh envoy claim 124 --no-cd
 gh envoy claim 125 --cd
 gh envoy claim 123 --resume
+gh envoy claim 126 --force
 ```
 
 Interactive claims enter a nested worktree shell by default. `--no-cd` is intended for callers that will start work separately; `--cd` makes the shell handoff explicit. The shell is selected from `SHELL`, then `COMSPEC`, with a platform fallback.
@@ -124,6 +125,14 @@ gh envoy claim 123 --resume
 ```
 
 Resume is read-only: it does not create a generation, refresh a base, or change persisted scope. It verifies that the active branch is still registered at the claimed worktree, then opens the nested shell there. Creation options, `--no-cd`, and `--json` cannot be combined with `--resume`.
+
+For GitHub remotes, claim checks issue state before creating local state. Closed issues are refused unless the override is explicit:
+
+```sh
+gh envoy claim 126 --force
+```
+
+`--force` overrides only the closed-issue gate. A forced claim emits a warning. If GitHub is unavailable or unauthenticated, claim preserves offline operation, records no title, and warns that the issue remains unverified.
 
 Existing local branches and registered worktrees can be adopted without resetting or moving them:
 
@@ -141,7 +150,7 @@ gh envoy claim 126 --after 123 --after 124 \
   --note 'Coordinate this integration manually'
 ```
 
-Adopted branches must contain the captured base, `--onto` requires an active local parent claim, and direct or duplicate dependencies are refused. Issue existence remains unverified until GitHub observation is implemented.
+Adopted branches must contain the captured base, `--onto` requires an active local parent claim, and direct or duplicate dependencies are refused. A successful GitHub lookup records the issue title; an unavailable lookup remains explicitly unverified.
 
 Envoy first attempts to refresh the configured remote base. When the remote is unavailable, it can use an existing remote-tracking ref or local base branch and reports the unverified fallback explicitly. Claim state is journaled under the shared Git common directory so interrupted operations remain inspectable.
 
