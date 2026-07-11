@@ -117,9 +117,26 @@ pub fn claim_issue_with_options<R: CommandRunner>(
                     ));
                 }
             }
+            GithubIssueObservation::NotFound => return Err(LifecycleError::MissingIssue(issue)),
             GithubIssueObservation::Unavailable => issue_warnings.push(format!(
                 "GitHub issue #{issue} could not be verified; continuing with unverified local intent"
             )),
+        }
+        for dependency in &options.after {
+            match observe_issue(
+                runner,
+                &repository.main_worktree,
+                &repository.repository,
+                *dependency,
+            )? {
+                GithubIssueObservation::Available(_) => {}
+                GithubIssueObservation::NotFound => {
+                    return Err(LifecycleError::MissingWaitForIssue(*dependency));
+                }
+                GithubIssueObservation::Unavailable => issue_warnings.push(format!(
+                    "wait_for GitHub issue #{dependency} could not be verified; continuing with unverified local intent"
+                )),
+            }
         }
     }
     let git = GitCli::new(runner);
@@ -869,6 +886,10 @@ pub enum LifecycleError {
     GithubIssue(#[from] GithubIssueError),
     #[error("issue {0} is closed on GitHub; use --force to claim it anyway")]
     ClosedIssue(NonZeroU64),
+    #[error("GitHub issue {0} does not exist or is not reachable in this repository")]
+    MissingIssue(NonZeroU64),
+    #[error("wait_for GitHub issue {0} does not exist or is not reachable in this repository")]
+    MissingWaitForIssue(NonZeroU64),
     #[error("issue {issue} is already claimed by generation {claim_id}")]
     AlreadyClaimed { issue: NonZeroU64, claim_id: Uuid },
     #[error("claim reservation refused: {0}")]
@@ -901,6 +922,8 @@ impl LifecycleError {
                 | Self::Refused(_)
                 | Self::NoClaim(_)
                 | Self::ClosedIssue(_)
+                | Self::MissingIssue(_)
+                | Self::MissingWaitForIssue(_)
         )
     }
 }

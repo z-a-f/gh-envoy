@@ -52,7 +52,7 @@ Choose the claim form that matches the work:
 | Claim inventory | `gh envoy list` | Show every active and released claim generation. |
 | Automation | `gh envoy status --strict --json` | Consume machine-readable output and fail on coordination warnings. |
 
-Current commands perform no GitHub writes. Claim performs a read-only issue-state lookup when the remote is on GitHub; ongoing issue/PR observation in status and doctor, guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
+Current commands perform no GitHub writes. For GitHub remotes, claim validates issue intent, while status and doctor read issue and exact-branch pull-request facts. Guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
 
 See the [dogfooding guide](docs/dogfooding.md) for complete workflows, stack and dependency behavior, safety gates, configuration, JSON use, and troubleshooting. The [docs index](docs/README.md) separates operator guidance from the normative [product specification](spec.md).
 
@@ -132,7 +132,7 @@ For GitHub remotes, claim checks issue state before creating local state. Closed
 gh envoy claim 126 --force
 ```
 
-`--force` overrides only the closed-issue gate. A forced claim emits a warning. If GitHub is unavailable or unauthenticated, claim preserves offline operation, records no title, and warns that the issue remains unverified.
+`--force` overrides only the closed-issue gate. A forced claim emits a warning. A reachable missing target or `--after` issue is refused before local mutation. If GitHub is unavailable or unauthenticated, claim preserves offline operation, records no title, and warns that the issue remains unverified.
 
 Existing local branches and registered worktrees can be adopted without resetting or moving them:
 
@@ -150,7 +150,7 @@ gh envoy claim 126 --after 123 --after 124 \
   --note 'Coordinate this integration manually'
 ```
 
-Adopted branches must contain the captured base, `--onto` requires an active local parent claim, and direct or duplicate dependencies are refused. A successful GitHub lookup records the issue title; an unavailable lookup remains explicitly unverified.
+Adopted branches must contain the captured base, `--onto` requires an active local parent claim, and direct or duplicate dependencies are refused. A successful GitHub lookup records the issue title and validates reachable `--after` issues; an unavailable lookup remains explicitly unverified.
 
 Envoy first attempts to refresh the configured remote base. When the remote is unavailable, it can use an existing remote-tracking ref or local base branch and reports the unverified fallback explicitly. Claim state is journaled under the shared Git common directory so interrupted operations remain inspectable.
 
@@ -177,7 +177,7 @@ gh envoy status
 gh envoy status --json
 ```
 
-Status renders one readable block per active claim rather than a terminal-wide table. It always displays declared allowed/disallowed scope, derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. Interactive terminals use color for healthy, warning, and problem markers; redirected output stays plain. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands.
+Status renders one readable block per active claim rather than a terminal-wide table. It always displays declared allowed/disallowed scope, derives diffs, overlap relationships, scope findings, local integrity hints, and read-only GitHub issue/PR facts without changing repository or Envoy state. Missing persisted titles are populated only in derived output; claim files are never rewritten. Interactive terminals use color for healthy, warning, and problem markers; redirected output stays plain. Offline or unauthenticated GitHub facts are explicitly unavailable.
 
 Overlap is evidence from current diffs, not a prediction from intersecting scope globs. Two claims that both declare `README.md` show `none (diff-based)` until both actually change that path; then the overlap is reported. Leading `./` and Windows `\` separators in new scope declarations are normalized to Git's repository-relative `/` paths.
 
@@ -192,7 +192,7 @@ gh envoy doctor --stack 123
 gh envoy doctor 123 --json
 ```
 
-Doctor verifies persisted claim schemas, canonical worktree ownership, branches, captured base SHAs, diff derivation, dependency graphs, overlap, scope, and interrupted operation journals without mutating Git or Envoy state. It reports separate integrity, publish, and merge gates, uses exit codes `0` for ok, `1` for warning, `2` for blocked, and `3` for an operational error, and emits conservative recovery commands for abandoned operations. Path evidence is shortened in JSON by default according to `redact_paths_in_json`; human recovery instructions retain full paths.
+Doctor verifies persisted claim schemas, canonical worktree ownership, branches, captured base SHAs, diff derivation, dependency graphs, overlap, scope, interrupted operation journals, and read-only GitHub facts without mutating Git, GitHub, or Envoy state. An existing PR whose base differs from the claim's recorded base blocks publish. Merged PRs and closed issues produce idempotent release recommendations. Offline GitHub checks are skipped while local diagnosis remains available. Doctor reports separate integrity, publish, and merge gates, uses exit codes `0` for ok, `1` for warning, `2` for blocked, and `3` for an operational error. Path evidence is shortened in JSON by default according to `redact_paths_in_json`; human recovery instructions retain full paths.
 
 Stack doctor follows exact `base_claim_id` generations and renders them from root to target. It never substitutes a reclaimed issue generation. An advanced parent whose captured SHA remains in history leaves publish `ok` and warns merge; rewritten, missing, or released exact parents block publish. `base_claim_id` and `wait_for` cycles are publish errors. Consolidation diffs receive a neutral annotation because multi-parent diff-base computation remains deferred, while their exact-generation overlaps retain the normal risk severity.
 
