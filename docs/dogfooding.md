@@ -44,9 +44,9 @@ Create a fresh claim from the repository's selected base:
 gh envoy claim 123
 ```
 
-The command prints the claim, branch, worktree, captured base, and any warning about base verification. Change into the reported worktree before modifying files or starting an agent.
+The command prints the claim, branch, worktree, captured base, and any warning about base verification. In an interactive terminal it then opens a nested shell in the claimed worktree. Modify files or start an agent from that shell.
 
-Envoy also prints an explicit directory-change prompt after the exact `Worktree` path. The `gh-envoy` extension is a child process and cannot persistently change its parent shell's directory, so a CLI-only `--switch` flag cannot provide that behavior. A future optional shell integration may wrap claim and `cd` as one shell operation.
+The `gh-envoy` extension cannot persistently change its parent shell's directory. The nested shell provides the intended claim-and-enter workflow; exit it to return to the original directory. Use `gh envoy claim 123 --no-cd` to skip the shell or `--cd` to request it explicitly. Non-interactive and JSON claims do not enter a shell by default, and `--cd` cannot be combined with `--json`.
 
 During development:
 
@@ -169,6 +169,10 @@ gh envoy claim 601 \
 ```
 
 `--scope` and `--disallow` accept repeatable glob patterns. They are declarations, not filesystem enforcement. A worker can still edit another path, but Envoy reports the mismatch. Keep scopes meaningful rather than enumerating every expected file; the goal is useful coordination evidence.
+
+Status displays the declaration immediately, even before a file changes. Scope patterns are normalized to repository-relative Git paths, so `./README.md`, `README.md`, and Windows-style `.\README.md` declarations behave consistently for new claims.
+
+Overlap remains diff-based: two claims declaring the same scope do not overlap until both diffs contain the same path. Status labels the empty state `none (diff-based)` to make that timing explicit.
 
 ## Scenario 7: work with no usable remote
 

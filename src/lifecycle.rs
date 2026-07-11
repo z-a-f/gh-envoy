@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::command::{CommandRunner, RunnerError, text_from_utf8_output};
 use crate::config::{Config, ConfigError};
+use crate::conflict::{normalize_scope_pattern, validate_scope_pattern};
 use crate::git::{CliCommandError, GitCli, RepositoryContext, RepositoryError, canonical_existing};
 use crate::model::{
     Claim, DeclaredScope, OperationKind, OperationPhase, OperationRecord, ReleaseMarker,
@@ -45,8 +46,9 @@ pub fn claim_issue_with_options<R: CommandRunner>(
     runner: &R,
     cwd: &Path,
     issue: NonZeroU64,
-    options: ClaimOptions,
+    mut options: ClaimOptions,
 ) -> Result<ClaimOutcome, LifecycleError> {
+    normalize_and_validate_scope(&mut options)?;
     validate_relationship_arguments(issue, &options)?;
     let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
     let config = Config::load(&common_dir)?;
@@ -293,6 +295,18 @@ pub fn claim_issue_with_options<R: CommandRunner>(
         claim,
         warnings: base.warnings,
     })
+}
+
+fn normalize_and_validate_scope(options: &mut ClaimOptions) -> Result<(), LifecycleError> {
+    for patterns in [&mut options.allowed_paths, &mut options.disallowed_paths] {
+        for pattern in patterns {
+            let normalized = normalize_scope_pattern(pattern);
+            validate_scope_pattern(&normalized)
+                .map_err(|error| LifecycleError::Refused(error.to_string()))?;
+            *pattern = normalized;
+        }
+    }
+    Ok(())
 }
 
 pub fn release_claim<R: CommandRunner>(

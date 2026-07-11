@@ -218,7 +218,17 @@ fn render_status(report: &StatusReport, color: bool) -> String {
             &mut output,
             color,
             "Overlaps",
-            if overlaps == "-" { "none" } else { &overlaps },
+            if overlaps == "-" {
+                "none (diff-based)"
+            } else {
+                &overlaps
+            },
+        );
+        append_field(
+            &mut output,
+            color,
+            "Scope",
+            &declared_scope_summary(status.claim.declared_scope.as_ref()),
         );
         append_field(&mut output, color, "Pull request", &pr);
         append_field(
@@ -231,6 +241,24 @@ fn render_status(report: &StatusReport, color: bool) -> String {
     }
     append_problems(&mut output, report, color);
     output
+}
+
+fn declared_scope_summary(scope: Option<&crate::model::DeclaredScope>) -> String {
+    let Some(scope) = scope else {
+        return "none".to_owned();
+    };
+    let mut parts = Vec::new();
+    if !scope.allowed_paths.is_empty() {
+        parts.push(format!("allow: {}", scope.allowed_paths.join(", ")));
+    }
+    if !scope.disallowed_paths.is_empty() {
+        parts.push(format!("deny: {}", scope.disallowed_paths.join(", ")));
+    }
+    if parts.is_empty() {
+        "none".to_owned()
+    } else {
+        parts.join("; ")
+    }
 }
 
 fn claim_has_warnings(status: &ClaimStatus, problems: &[LocalProblem]) -> bool {

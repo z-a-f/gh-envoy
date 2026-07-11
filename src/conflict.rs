@@ -299,8 +299,20 @@ fn compile_risk_rules(
 fn compile_matchers(patterns: &[String]) -> Result<Vec<GlobMatcher>, ConflictError> {
     patterns
         .iter()
-        .map(|pattern| compile_glob(pattern))
+        .map(|pattern| compile_glob(&normalize_scope_pattern(pattern)))
         .collect()
+}
+
+pub fn normalize_scope_pattern(pattern: &str) -> String {
+    let normalized = pattern.replace('\\', "/");
+    normalized
+        .strip_prefix("./")
+        .unwrap_or(&normalized)
+        .to_owned()
+}
+
+pub fn validate_scope_pattern(pattern: &str) -> Result<(), ConflictError> {
+    compile_glob(&normalize_scope_pattern(pattern)).map(|_| ())
 }
 
 fn risk_labels(path: &str, rules: &[RiskRule]) -> Vec<String> {

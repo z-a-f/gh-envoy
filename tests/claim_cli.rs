@@ -88,11 +88,11 @@ fn claim_records_stack_generation_wait_refs_scope_and_note() {
             "--after",
             "124",
             "--scope",
-            "src/**",
+            "./src/**",
             "--scope",
-            "tests/**",
+            ".\\tests\\**",
             "--disallow",
-            ".github/**",
+            "./.github/**",
             "--note",
             "coordinate manually",
             "--json",
@@ -429,6 +429,7 @@ fn invalid_relationships_and_adoptions_are_blocked_without_moving_branches() {
         vec!["claim", "8", "--onto", "999", "--json"],
         vec!["claim", "8", "--branch", "missing", "--json"],
         vec!["claim", "8", "--worktree", "missing-worktree", "--json"],
+        vec!["claim", "8", "--scope", "[", "--json"],
     ] {
         let error = fixture.envoy_json(&arguments, 2);
         assert_eq!(error["status"], "blocked");

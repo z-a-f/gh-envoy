@@ -6,7 +6,7 @@ use gh_envoy::conflict::{
     DiffOverlap, OverlapConfidence, OverlapRelationship, OverlapSeverity, ScopeWarning,
     ScopeWarningReason,
 };
-use gh_envoy::model::{Claim, SCHEMA_VERSION};
+use gh_envoy::model::{Claim, DeclaredScope, SCHEMA_VERSION};
 use gh_envoy::observation::{DiffSummary, LocalProblem, LocalProblemCode};
 use gh_envoy::status::{
     ClaimStatus, GithubState, StatusReport, render_status_human, render_status_human_colored,
@@ -87,6 +87,22 @@ fn colored_status_uses_ansi_only_when_requested() {
     assert!(colored.contains("\u{1b}[33m!\u{1b}[0m #12"));
     assert!(colored.contains("\u{1b}[2mBranch\u{1b}[0m"));
     assert!(colored.contains("\u{1b}[31m✗\u{1b}[0m missing_branch"));
+}
+
+#[test]
+fn declared_scope_is_visible_before_the_diff_has_changes() {
+    let mut report = fixture_report();
+    report.claims[0].claim.declared_scope = Some(DeclaredScope {
+        allowed_paths: vec!["README.md".to_owned()],
+        disallowed_paths: vec![".github/**".to_owned()],
+    });
+    report.claims[0].diff = DiffSummary::default();
+    report.claims[0].overlaps.clear();
+
+    let human = render_status_human(&report);
+
+    assert!(human.contains("Overlaps      none (diff-based)"));
+    assert!(human.contains("Scope         allow: README.md; deny: .github/**"));
 }
 
 #[test]

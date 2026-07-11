@@ -30,14 +30,14 @@ You can also invoke `target/release/gh-envoy` directly. On Windows, Git for Wind
 The basic dogfooding loop is:
 
 1. From any worktree in the target repository, claim an issue with `gh envoy claim 123`.
-2. Change into the worktree printed by the command and start the human or agent doing issue 123 there.
+2. In an interactive terminal, Envoy opens a nested shell in the new worktree. Start the human or agent doing issue 123 there.
 3. Repeat for other independent issues. Each claim receives its own branch and worktree.
 4. Use `gh envoy list` for claim history and `gh envoy status` for active ownership, overlap, scope, and integrity concerns.
 5. Before publishing or integrating work, run `gh envoy doctor 123`, or `gh envoy doctor --stack 123` for stacked work.
 6. Push, open the pull request, review, and merge with your existing tools. Envoy v0.1 does not write to GitHub.
 7. Mark the local claim complete with `gh envoy release 123 --reason merged`. Release preserves the branch and worktree.
 
-`gh envoy` runs as a child process, so it cannot change the directory of the shell that launched it. Claim output ends with an explicit prompt to change into the exact `Worktree` path it printed. A future shell integration could make claim-and-switch a single shell operation, but a CLI `--switch` flag alone cannot persistently switch its parent shell.
+`gh envoy` cannot change the directory of its parent shell. Instead, an interactive human claim opens a nested shell in the exact claimed worktree; exit that shell to return to the original directory. Use `--no-cd` to create the claim and return immediately, or `--cd` to request the worktree shell explicitly. JSON claims never open a shell.
 
 Choose the claim form that matches the work:
 
@@ -110,7 +110,11 @@ Fresh, unstacked claims provision an isolated branch and worktree from an exact 
 
 ```sh
 gh envoy claim 123
+gh envoy claim 124 --no-cd
+gh envoy claim 125 --cd
 ```
+
+Interactive claims enter a nested worktree shell by default. `--no-cd` is intended for callers that will start work separately; `--cd` makes the shell handoff explicit. The shell is selected from `SHELL`, then `COMSPEC`, with a platform fallback.
 
 Existing local branches and registered worktrees can be adopted without resetting or moving them:
 
@@ -155,7 +159,9 @@ gh envoy status
 gh envoy status --json
 ```
 
-Status renders one readable block per active claim rather than a terminal-wide table. It derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. Interactive terminals use color for healthy, warning, and problem markers; redirected output stays plain. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands.
+Status renders one readable block per active claim rather than a terminal-wide table. It always displays declared allowed/disallowed scope, derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. Interactive terminals use color for healthy, warning, and problem markers; redirected output stays plain. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands.
+
+Overlap is evidence from current diffs, not a prediction from intersecting scope globs. Two claims that both declare `README.md` show `none (diff-based)` until both actually change that path; then the overlap is reported. Leading `./` and Windows `\` separators in new scope declarations are normalized to Git's repository-relative `/` paths.
 
 Status is informational and exits `0` after rendering, even when the report contains warnings. Use `gh envoy status --strict` when a warning should produce exit code `1`, such as in CI. For a stale claim whose branch and worktree are both gone, run doctor for the safe marker-only release recommendation.
 

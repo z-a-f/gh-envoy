@@ -116,6 +116,72 @@ fn human_output_reports_claim_warning_and_release_result() {
     assert!(String::from_utf8_lossy(&repeated.stdout).contains("already released"));
 }
 
+#[cfg(unix)]
+#[test]
+fn claim_cd_enters_a_shell_in_the_new_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = RepositoryFixture::with_remote();
+    let shell = fixture._root.path().join("capture-shell");
+    let capture = fixture._root.path().join("shell-pwd");
+    fs::write(&shell, "#!/bin/sh\npwd > \"$ENVOY_TEST_CAPTURE\"\n").expect("write shell");
+    let mut permissions = fs::metadata(&shell).expect("shell metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shell, permissions).expect("make shell executable");
+
+    let output = envoy()
+        .current_dir(fixture.repository())
+        .env("SHELL", &shell)
+        .env("ENVOY_TEST_CAPTURE", &capture)
+        .args(["claim", "12", "--cd"])
+        .output()
+        .expect("claim and enter shell");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("claim output");
+    assert!(stdout.contains("Entering a shell in"));
+    assert!(!stdout.contains("Next: change directory"));
+    let entered = PathBuf::from(fs::read_to_string(capture).expect("captured cwd").trim());
+    let reported = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Worktree: "))
+        .expect("reported worktree");
+    assert_same_existing_path(&entered, reported);
+    assert!(
+        entered
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("issue-12-")
+    );
+}
+
+#[test]
+fn claim_cd_shell_failure_warns_without_losing_the_claim() {
+    let fixture = RepositoryFixture::with_remote();
+    let missing_shell = fixture._root.path().join("missing-shell");
+
+    let output = envoy()
+        .current_dir(fixture.repository())
+        .env("SHELL", missing_shell)
+        .args(["claim", "13", "--cd"])
+        .output()
+        .expect("claim with missing shell");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("claim succeeded, but the worktree shell could not start")
+    );
+    assert_eq!(
+        fixture
+            .git_stdout(&["branch", "--list", "envoy/issue-13-*"])
+            .lines()
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn concurrent_claims_produce_one_winner_without_git_leaks() {
     let fixture = RepositoryFixture::with_remote();

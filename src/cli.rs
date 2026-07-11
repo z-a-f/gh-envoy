@@ -1,6 +1,8 @@
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::num::NonZeroU64;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -83,6 +85,20 @@ pub struct ClaimArgs {
 
     #[arg(long, value_name = "TEXT")]
     pub note: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["no_cd", "json"],
+        help = "Enter a nested shell in the claimed worktree (interactive default)"
+    )]
+    pub cd: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "cd",
+        help = "Do not enter the claimed worktree after claiming"
+    )]
+    pub no_cd: bool,
 }
 
 #[derive(Debug, Args)]
@@ -311,6 +327,12 @@ fn terminal_colors_for(is_terminal: bool, no_color: bool, dumb_terminal: bool) -
 }
 
 fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
+    let enter_shell = claim_cd_enabled(
+        arguments.cd,
+        arguments.no_cd,
+        json,
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+    );
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -353,7 +375,7 @@ fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
                 }
                 let _ = writeln!(
                     io::stdout().lock(),
-                    "Claimed issue #{} as {}\nBranch: {}\nWorktree: {}\nBase: {}/{} at {}\nNext: change directory to the claimed worktree above before starting work.",
+                    "Claimed issue #{} as {}\nBranch: {}\nWorktree: {}\nBase: {}/{} at {}",
                     outcome.claim.issue,
                     &outcome.claim.claim_id.to_string()[..8],
                     outcome.claim.branch,
@@ -362,15 +384,72 @@ fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
                     outcome.claim.base_ref,
                     outcome.claim.base_sha,
                 );
+                if !enter_shell {
+                    let _ = writeln!(
+                        io::stdout().lock(),
+                        "Next: change directory to the claimed worktree above before starting work."
+                    );
+                }
             }
-            if outcome.warnings.is_empty() {
+            let mut exit_code = if outcome.warnings.is_empty() {
                 EnvoyExitCode::Success
             } else {
                 EnvoyExitCode::Warning
+            };
+            if enter_shell && let Err(error) = enter_worktree_shell(&outcome.claim.worktree) {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "warning: claim succeeded, but the worktree shell could not start: {error}"
+                );
+                exit_code = EnvoyExitCode::Warning;
             }
+            exit_code
         }
         Err(error) => render_lifecycle_error("claim", json, &error),
     }
+}
+
+fn claim_cd_enabled(force: bool, disable: bool, json: bool, interactive: bool) -> bool {
+    !json && !disable && (force || interactive)
+}
+
+fn enter_worktree_shell(worktree: &Path) -> io::Result<()> {
+    let shell = preferred_shell();
+    writeln!(
+        io::stdout().lock(),
+        "Entering a shell in {}. Exit that shell to return.",
+        worktree.display()
+    )?;
+    io::stdout().lock().flush()?;
+    ProcessCommand::new(shell)
+        .current_dir(worktree)
+        .status()
+        .map(|_| ())
+}
+
+fn preferred_shell() -> OsString {
+    preferred_shell_from(
+        std::env::var_os("SHELL"),
+        std::env::var_os("COMSPEC"),
+        cfg!(windows),
+    )
+}
+
+fn preferred_shell_from(
+    shell: Option<OsString>,
+    comspec: Option<OsString>,
+    windows: bool,
+) -> OsString {
+    shell
+        .filter(|shell| !shell.is_empty())
+        .or_else(|| comspec.filter(|shell| !shell.is_empty()))
+        .unwrap_or_else(|| {
+            if windows {
+                OsString::from("cmd.exe")
+            } else {
+                OsString::from("/bin/sh")
+            }
+        })
 }
 
 fn run_release(arguments: ReleaseArgs, json: bool) -> EnvoyExitCode {
@@ -480,7 +559,10 @@ mod tests {
     use clap::Parser;
     use tempfile::TempDir;
 
-    use super::{Cli, EnvoyCommand, doctor_json_redacts_paths, terminal_colors_for};
+    use super::{
+        Cli, EnvoyCommand, claim_cd_enabled, doctor_json_redacts_paths, preferred_shell_from,
+        terminal_colors_for,
+    };
 
     #[test]
     fn doctor_allows_no_specific_subject() {
@@ -494,6 +576,48 @@ mod tests {
         assert!(!terminal_colors_for(false, false, false));
         assert!(!terminal_colors_for(true, true, false));
         assert!(!terminal_colors_for(true, false, true));
+    }
+
+    #[test]
+    fn claim_cd_flags_are_explicit_and_mutually_exclusive() {
+        let cd = Cli::try_parse_from(["gh-envoy", "claim", "7", "--cd"]).expect("--cd parses");
+        let no_cd =
+            Cli::try_parse_from(["gh-envoy", "claim", "7", "--no-cd"]).expect("--no-cd parses");
+        let EnvoyCommand::Claim(cd) = cd.command else {
+            panic!("claim command");
+        };
+        let EnvoyCommand::Claim(no_cd) = no_cd.command else {
+            panic!("claim command");
+        };
+        assert!(cd.cd && !cd.no_cd);
+        assert!(!no_cd.cd && no_cd.no_cd);
+        assert!(Cli::try_parse_from(["gh-envoy", "claim", "7", "--cd", "--no-cd"]).is_err());
+        assert!(Cli::try_parse_from(["gh-envoy", "claim", "7", "--cd", "--json"]).is_err());
+    }
+
+    #[test]
+    fn claim_cd_defaults_to_interactive_human_sessions() {
+        assert!(claim_cd_enabled(false, false, false, true));
+        assert!(!claim_cd_enabled(false, false, false, false));
+        assert!(claim_cd_enabled(true, false, false, false));
+        assert!(!claim_cd_enabled(true, false, true, true));
+        assert!(!claim_cd_enabled(true, true, false, true));
+    }
+
+    #[test]
+    fn claim_cd_shell_selection_has_cross_platform_fallbacks() {
+        use std::ffi::OsString;
+
+        assert_eq!(
+            preferred_shell_from(Some(OsString::from("zsh")), None, false),
+            "zsh"
+        );
+        assert_eq!(
+            preferred_shell_from(None, Some(OsString::from("powershell")), true),
+            "powershell"
+        );
+        assert_eq!(preferred_shell_from(None, None, false), "/bin/sh");
+        assert_eq!(preferred_shell_from(None, None, true), "cmd.exe");
     }
 
     #[test]

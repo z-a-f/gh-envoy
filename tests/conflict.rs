@@ -230,6 +230,45 @@ fn scope_checks_cover_tracked_and_untracked_paths_with_independent_reasons() {
     }
 }
 
+#[test]
+fn dot_relative_scope_matches_repository_relative_git_paths() {
+    let mut scoped = claim(1);
+    scoped.declared_scope = Some(DeclaredScope {
+        allowed_paths: vec!["./README.md".to_owned()],
+        disallowed_paths: Vec::new(),
+    });
+    let mut claims = vec![observed(scoped, tracked(&["README.md"]))];
+
+    analyze_claims(&mut claims, &BTreeMap::new()).expect("analyze dot-relative scope");
+
+    assert!(claims[0].scope_warnings.is_empty());
+}
+
+#[test]
+fn shared_declared_scope_is_not_an_overlap_until_both_diffs_touch_a_path() {
+    let mut first = claim(1);
+    let mut second = claim(2);
+    for claim in [&mut first, &mut second] {
+        claim.declared_scope = Some(DeclaredScope {
+            allowed_paths: vec!["README.md".to_owned()],
+            disallowed_paths: Vec::new(),
+        });
+    }
+    let mut claims = vec![
+        observed(first, DiffSummary::default()),
+        observed(second, DiffSummary::default()),
+    ];
+
+    analyze_claims(&mut claims, &BTreeMap::new()).expect("analyze empty diffs");
+    assert!(claims.iter().all(|claim| claim.overlaps.is_empty()));
+
+    for claim in &mut claims {
+        claim.diff = Some(tracked(&["README.md"]));
+    }
+    analyze_claims(&mut claims, &BTreeMap::new()).expect("analyze shared change");
+    assert_eq!(claims[0].overlaps[0].shared_paths, ["README.md"]);
+}
+
 fn related_pair(
     relationship: OverlapRelationship,
     confidence: OverlapConfidence,

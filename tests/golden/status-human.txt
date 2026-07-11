@@ -6,6 +6,7 @@ Active claims: 2
   Base          origin/main@01234567
   Changes       2 changed, 1 untracked
   Overlaps      sibling:1, unrelated:1
+  Scope         none
   Pull request  -
   GitHub        unverified
   Local         scope:1
@@ -15,7 +16,8 @@ Active claims: 2
   Worktree      …/fixture-issue-13
   Base          origin/main@01234567
   Changes       unavailable
-  Overlaps      none
+  Overlaps      none (diff-based)
+  Scope         none
   Pull request  -
   GitHub        unverified
   Local         missing_branch
