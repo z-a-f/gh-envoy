@@ -233,6 +233,47 @@ fn ordered_stack_nodes_roll_up_into_the_aggregate_report() {
     let value = serde_json::to_value(doctor_document(&report)).expect("serialize stack doctor");
     assert_eq!(value["doctor"]["nodes"][0]["issue"], 11);
     assert_eq!(value["doctor"]["nodes"][1]["issue"], 12);
+    assert_text_eq(
+        &render_doctor_human(&report),
+        include_str!("golden/doctor-stack-human.txt"),
+    );
+    assert_text_eq(
+        &serde_json::to_string(&doctor_document(&report)).expect("serialize stack doctor"),
+        include_str!("golden/doctor-stack-json.json").trim_end(),
+    );
+}
+
+#[test]
+fn stack_node_paths_are_redacted_recursively() {
+    let path = std::env::temp_dir().join("stack-node-worktree");
+    let node = DoctorNodeReport::new(
+        issue(15),
+        uuid::Uuid::new_v4(),
+        vec![
+            DoctorCheck::new(
+                "integrity.worktree",
+                CheckGate::Integrity,
+                "Worktree",
+                CheckStatus::Pass,
+                "worktree is valid",
+            )
+            .with_evidence(serde_json::json!({"worktree": path})),
+        ],
+        vec![format!("Inspect {}", path.display())],
+    );
+    let report =
+        DoctorReport::new(subject(), Vec::new(), Vec::new(), timestamp()).with_nodes(vec![node]);
+
+    let redacted = redact_doctor_paths(&report);
+
+    assert_eq!(
+        redacted.nodes[0].checks[0].evidence.as_ref().unwrap()["worktree"],
+        "…/stack-node-worktree"
+    );
+    assert_eq!(
+        redacted.nodes[0].recommendations,
+        ["Inspect …/stack-node-worktree"]
+    );
 }
 
 fn check(status: CheckStatus) -> DoctorCheck {

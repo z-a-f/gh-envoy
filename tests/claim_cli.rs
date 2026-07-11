@@ -273,6 +273,42 @@ fn released_parent_blocks_without_substituting_reclaimed_generation() {
 }
 
 #[test]
+fn dogfood_stack_sibling_and_risk_overlap_gates_are_coherent() {
+    let fixture = RepositoryFixture::with_remote();
+    fixture.envoy_json(&["claim", "401", "--json"], 0);
+    let first = fixture.envoy_json(&["claim", "402", "--onto", "401", "--json"], 0);
+    let second = fixture.envoy_json(&["claim", "403", "--onto", "401", "--json"], 0);
+    for claim in [&first, &second] {
+        let worktree = PathBuf::from(claim["claim"]["worktree"].as_str().unwrap());
+        fs::create_dir_all(worktree.join("src")).expect("create source directory");
+        fs::create_dir_all(worktree.join(".github/workflows")).expect("create workflow directory");
+        fs::write(worktree.join("src/shared.rs"), "shared\n").expect("write ordinary overlap");
+        fs::write(worktree.join(".github/workflows/ci.yml"), "name: shared\n")
+            .expect("write risk overlap");
+    }
+
+    let report = fixture.envoy_json(&["doctor", "402", "--json"], 2);
+
+    assert_eq!(report["doctor"]["gates"]["publish"], "ok");
+    assert_eq!(report["doctor"]["gates"]["merge"], "blocked");
+    let overlaps = report["doctor"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|check| check["id"] == "merge.overlap")
+        .collect::<Vec<_>>();
+    assert!(overlaps.iter().any(|check| check["status"] == "warn"));
+    assert!(overlaps.iter().any(|check| {
+        check["status"] == "fail"
+            && check["evidence"]["overlap"]["labels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|label| label == "workflow")
+    }));
+}
+
+#[test]
 fn branch_and_worktree_adoption_preserve_existing_git_state() {
     let fixture = RepositoryFixture::with_remote();
     fixture.git(&["branch", "existing-branch", "main"]);

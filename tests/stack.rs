@@ -103,6 +103,37 @@ fn wait_for_cycles_are_detected_independently_by_issue() {
     );
 }
 
+#[test]
+fn missing_exact_parent_reports_but_does_not_use_replacement() {
+    let fixture = Fixture::new();
+    let missing_id = uuid(8);
+    let replacement = claim(40, uuid(9), None);
+    let mut child = claim(41, uuid(10), None);
+    child.base_issue = Some(replacement.issue);
+    child.base_claim_id = Some(missing_id);
+    fixture.persist_claim(&child);
+    fixture.persist_claim(&replacement);
+
+    let resolution = resolve_stack(
+        &fixture.store,
+        &[replacement.clone(), child.clone()],
+        child.issue,
+    )
+    .expect("resolve stack");
+
+    assert_eq!(
+        resolution.problem,
+        Some(StackProblem::MissingParent {
+            child_claim_id: child.claim_id,
+            parent_issue: replacement.issue,
+            parent_claim_id: missing_id,
+            replacement_claim_id: Some(replacement.claim_id),
+        })
+    );
+    assert_eq!(resolution.nodes.len(), 1);
+    assert_eq!(resolution.nodes[0].claim.claim_id, child.claim_id);
+}
+
 struct Fixture {
     _root: TempDir,
     store: Store,

@@ -80,10 +80,20 @@ Run local integrity checks for the repository or one active issue:
 ```sh
 gh envoy doctor
 gh envoy doctor 123
+gh envoy doctor --stack 123
 gh envoy doctor 123 --json
 ```
 
-Doctor verifies persisted claim schemas, canonical worktree ownership, branches, captured base SHAs, diff derivation, and interrupted operation journals without mutating Git or Envoy state. It reports separate integrity, publish, and merge gates, uses exit codes `0` for ok, `1` for warning, `2` for blocked, and `3` for an operational error, and emits conservative recovery commands for abandoned operations. Path evidence is shortened in JSON by default according to `redact_paths_in_json`; human recovery instructions retain full paths. Stack-wide doctor checks remain explicitly unavailable until the stack coordination slice lands.
+Doctor verifies persisted claim schemas, canonical worktree ownership, branches, captured base SHAs, diff derivation, dependency graphs, overlap, scope, and interrupted operation journals without mutating Git or Envoy state. It reports separate integrity, publish, and merge gates, uses exit codes `0` for ok, `1` for warning, `2` for blocked, and `3` for an operational error, and emits conservative recovery commands for abandoned operations. Path evidence is shortened in JSON by default according to `redact_paths_in_json`; human recovery instructions retain full paths.
+
+Stack doctor follows exact `base_claim_id` generations and renders them from root to target. It never substitutes a reclaimed issue generation. An advanced parent whose captured SHA remains in history leaves publish `ok` and warns merge; rewritten, missing, or released exact parents block publish. `base_claim_id` and `wait_for` cycles are publish errors. Consolidation diffs receive a neutral annotation because multi-parent diff-base computation remains deferred, while their exact-generation overlaps retain the normal risk severity.
+
+Envoy never restacks automatically. After reviewing the effective base, use the reported recipe manually and rerun doctor:
+
+```sh
+git -C <child-worktree> rebase --onto <effective-base> <captured-parent-sha>
+gh envoy doctor --stack <child-issue>
+```
 
 ## Architecture
 
