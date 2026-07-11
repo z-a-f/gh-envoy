@@ -9,7 +9,8 @@ use gh_envoy::conflict::{
 use gh_envoy::model::{Claim, SCHEMA_VERSION};
 use gh_envoy::observation::{DiffSummary, LocalProblem, LocalProblemCode};
 use gh_envoy::status::{
-    ClaimStatus, GithubState, StatusReport, render_status_human, status_document,
+    ClaimStatus, GithubState, StatusReport, render_status_human, render_status_human_colored,
+    status_document,
 };
 use uuid::Uuid;
 
@@ -68,16 +69,24 @@ fn twenty_claims_render_as_one_deterministic_row_each() {
 
     let human = render_status_human(&report);
 
-    assert_eq!(human.lines().count(), 22);
-    assert!(human.lines().nth(1).unwrap().starts_with("--- | --- |"));
-    assert!(!human.contains("intentionally long"));
+    assert!(human.starts_with("Active claims: 20\n"));
+    assert!(human.contains("intentionally long"));
     for number in 1..=20 {
-        assert!(
-            human
-                .lines()
-                .any(|line| line.starts_with(&format!("#{number} |")))
-        );
+        assert!(human.contains(&format!("#{} ", number)));
     }
+}
+
+#[test]
+fn colored_status_uses_ansi_only_when_requested() {
+    let report = fixture_report();
+
+    let plain = render_status_human(&report);
+    let colored = render_status_human_colored(&report);
+
+    assert!(!plain.contains("\u{1b}["));
+    assert!(colored.contains("\u{1b}[33m!\u{1b}[0m #12"));
+    assert!(colored.contains("\u{1b}[2mBranch\u{1b}[0m"));
+    assert!(colored.contains("\u{1b}[31m✗\u{1b}[0m missing_branch"));
 }
 
 #[test]

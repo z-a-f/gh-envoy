@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod exit;
 pub mod git;
 pub mod lifecycle;
+pub mod list;
 pub mod model;
 pub mod observation;
 pub mod stack;

@@ -14,7 +14,7 @@ fn help_identifies_the_github_extension_entrypoint() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("help is UTF-8");
     assert!(stdout.contains("Usage: gh-envoy"), "{stdout}");
-    for command in ["claim", "status", "doctor", "release"] {
+    for command in ["claim", "list", "status", "doctor", "release"] {
         assert!(stdout.contains(command), "missing {command} in {stdout}");
     }
 }

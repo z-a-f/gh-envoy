@@ -24,8 +24,10 @@ fn read_only_listing_does_not_create_store_state() {
     let store = Store::new(root.clone());
 
     let claims = store.list_claims(issue(7)).expect("list absent claims");
+    let all_claims = store.all_claims().expect("list absent claim history");
 
     assert!(claims.is_empty());
+    assert!(all_claims.is_empty());
     assert!(
         store
             .list_operations()
@@ -59,6 +61,7 @@ fn locked_store_creates_layout_and_preserves_claim_generations() {
     assert!(!root.join("config.yml").exists());
     let claims = store.list_claims(issue(7)).expect("read claim history");
     assert_eq!(claims.len(), 2);
+    assert_eq!(store.all_claims().expect("read all claim history"), claims);
     assert!(claims.iter().any(|claim| claim.claim_id == first.claim_id));
     assert!(claims.iter().any(|claim| claim.claim_id == second.claim_id));
 }

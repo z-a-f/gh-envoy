@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -14,8 +14,13 @@ use crate::doctor::{
 use crate::exit::EnvoyExitCode;
 use crate::git::RepositoryContext;
 use crate::lifecycle::{ClaimOptions, LifecycleError, claim_issue_with_options, release_claim};
+use crate::list::{
+    get_claim_list, list_document, render_claim_list_human, render_claim_list_human_colored,
+};
 use crate::model::{Claim, ReleaseReason, ReleaseReport};
-use crate::status::{get_status, render_status_human, status_document};
+use crate::status::{
+    get_status, render_status_human, render_status_human_colored, status_document,
+};
 
 pub const SCHEMA_VERSION: &str = "0.1";
 
@@ -37,6 +42,8 @@ pub struct Cli {
 pub enum EnvoyCommand {
     /// Claim an issue for work in an isolated worktree.
     Claim(ClaimArgs),
+    /// List every recorded claim generation.
+    List,
     /// Show active claims and coordination findings.
     Status(StatusArgs),
     /// Check local integrity, publish readiness, and merge coordination.
@@ -168,9 +175,35 @@ pub fn main_entry() -> EnvoyExitCode {
 fn run(cli: Cli) -> EnvoyExitCode {
     match cli.command {
         EnvoyCommand::Claim(arguments) => run_claim(arguments, cli.json),
+        EnvoyCommand::List => run_list(cli.json),
         EnvoyCommand::Status(arguments) => run_status(arguments, cli.json),
         EnvoyCommand::Doctor(arguments) => run_doctor(arguments, cli.json),
         EnvoyCommand::Release(arguments) => run_release(arguments, cli.json),
+    }
+}
+
+fn run_list(json: bool) -> EnvoyExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return render_error("list", json, "current_directory", &error.to_string(), false);
+        }
+    };
+    match get_claim_list(&SystemRunner, &cwd) {
+        Ok(list) => {
+            if json {
+                write_json(&list_document(&list));
+            } else {
+                let rendered = if terminal_colors() {
+                    render_claim_list_human_colored(&list)
+                } else {
+                    render_claim_list_human(&list)
+                };
+                let _ = write!(io::stdout().lock(), "{rendered}");
+            }
+            EnvoyExitCode::Success
+        }
+        Err(error) => render_error("list", json, "operational_error", &error.to_string(), false),
     }
 }
 
@@ -242,7 +275,12 @@ fn run_status(arguments: StatusArgs, json: bool) -> EnvoyExitCode {
             if json {
                 write_json(&status_document(&report));
             } else {
-                let _ = write!(io::stdout().lock(), "{}", render_status_human(&report));
+                let rendered = if terminal_colors() {
+                    render_status_human_colored(&report)
+                } else {
+                    render_status_human(&report)
+                };
+                let _ = write!(io::stdout().lock(), "{rendered}");
             }
             if arguments.strict && report.has_warnings() {
                 EnvoyExitCode::Warning
@@ -258,6 +296,18 @@ fn run_status(arguments: StatusArgs, json: bool) -> EnvoyExitCode {
             false,
         ),
     }
+}
+
+fn terminal_colors() -> bool {
+    terminal_colors_for(
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var_os("TERM").is_some_and(|value| value == "dumb"),
+    )
+}
+
+fn terminal_colors_for(is_terminal: bool, no_color: bool, dumb_terminal: bool) -> bool {
+    is_terminal && !no_color && !dumb_terminal
 }
 
 fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
@@ -430,12 +480,20 @@ mod tests {
     use clap::Parser;
     use tempfile::TempDir;
 
-    use super::{Cli, EnvoyCommand, doctor_json_redacts_paths};
+    use super::{Cli, EnvoyCommand, doctor_json_redacts_paths, terminal_colors_for};
 
     #[test]
     fn doctor_allows_no_specific_subject() {
         let cli = Cli::try_parse_from(["gh-envoy", "doctor"]).expect("doctor parses");
         assert!(matches!(cli.command, EnvoyCommand::Doctor(_)));
+    }
+
+    #[test]
+    fn terminal_color_policy_requires_a_capable_interactive_terminal() {
+        assert!(terminal_colors_for(true, false, false));
+        assert!(!terminal_colors_for(false, false, false));
+        assert!(!terminal_colors_for(true, true, false));
+        assert!(!terminal_colors_for(true, false, true));
     }
 
     #[test]

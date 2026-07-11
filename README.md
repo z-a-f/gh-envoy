@@ -32,7 +32,7 @@ The basic dogfooding loop is:
 1. From any worktree in the target repository, claim an issue with `gh envoy claim 123`.
 2. Change into the worktree printed by the command and start the human or agent doing issue 123 there.
 3. Repeat for other independent issues. Each claim receives its own branch and worktree.
-4. Use `gh envoy status` while work is active to find ownership, overlap, scope, and integrity concerns.
+4. Use `gh envoy list` for claim history and `gh envoy status` for active ownership, overlap, scope, and integrity concerns.
 5. Before publishing or integrating work, run `gh envoy doctor 123`, or `gh envoy doctor --stack 123` for stacked work.
 6. Push, open the pull request, review, and merge with your existing tools. Envoy v0.1 does not write to GitHub.
 7. Mark the local claim complete with `gh envoy release 123 --reason merged`. Release preserves the branch and worktree.
@@ -49,6 +49,7 @@ Choose the claim form that matches the work:
 | Stacked change | `gh envoy claim 124 --onto 123` | Record that issue 124 is based on the exact active generation of issue 123. |
 | Consolidation work | `gh envoy claim 130 --after 123 --after 124` | Record that issue 130 should wait for several issue generations. |
 | Bounded ownership | `gh envoy claim 131 --scope 'src/**' --disallow '.github/workflows/**'` | Declare expected and prohibited paths so status and doctor can flag drift. |
+| Claim inventory | `gh envoy list` | Show every active and released claim generation. |
 | Automation | `gh envoy status --strict --json` | Consume machine-readable output and fail on coordination warnings. |
 
 Current commands are deliberately local and read-only with respect to GitHub. Issue-title and pull-request observation, guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
@@ -138,6 +139,15 @@ gh envoy release 123
 gh envoy release 123 --reason merged
 ```
 
+List the complete local claim history, including released generations:
+
+```sh
+gh envoy list
+gh envoy list --json
+```
+
+Human output uses compact per-claim summaries. Interactive terminals receive color automatically; redirected output and JSON remain free of ANSI escapes. Set `NO_COLOR` to disable color explicitly.
+
 Inspect all active claims and their local coordination findings from any registered worktree:
 
 ```sh
@@ -145,7 +155,7 @@ gh envoy status
 gh envoy status --json
 ```
 
-Status derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands.
+Status renders one readable block per active claim rather than a terminal-wide table. It derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. Interactive terminals use color for healthy, warning, and problem markers; redirected output stays plain. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands.
 
 Status is informational and exits `0` after rendering, even when the report contains warnings. Use `gh envoy status --strict` when a warning should produce exit code `1`, such as in CI. For a stale claim whose branch and worktree are both gone, run doctor for the safe marker-only release recommendation.
 

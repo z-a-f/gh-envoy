@@ -51,11 +51,14 @@ Envoy also prints an explicit directory-change prompt after the exact `Worktree`
 During development:
 
 ```sh
+gh envoy list
 gh envoy status
 gh envoy doctor 123
 ```
 
-`status` is the repository-wide coordination view. `doctor 123` is the focused pre-publish and pre-merge check. Neither command mutates Git or Envoy state.
+`list` is the full local history of active and released claim generations. `status` is the active repository coordination view. `doctor 123` is the focused pre-publish and pre-merge check. None of these commands mutate Git or Envoy state.
+
+Human `list` and `status` output uses compact per-claim blocks and adds color when stdout is an interactive terminal. Piped output, redirected output, and JSON never contain color escapes. Set the standard `NO_COLOR` environment variable to disable color.
 
 Status exits `0` when it renders successfully, even if the human or JSON report says `warning`. Use `gh envoy status --strict` when warnings should return exit code `1`.
 
@@ -257,6 +260,7 @@ The following distinction matters during dogfooding:
 | Capability | Status |
 | --- | --- |
 | Claim creation and adoption | Available now. |
+| Full active and released claim history with `list` | Available now. |
 | Local status, overlap, scope, and integrity observation | Available now. |
 | Single-claim and exact-generation stack doctor | Available now. |
 | Marker-only, idempotent release | Available now. |

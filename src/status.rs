@@ -153,18 +153,23 @@ pub fn get_status<R: CommandRunner>(runner: &R, cwd: &Path) -> Result<StatusRepo
 }
 
 pub fn render_status_human(report: &StatusReport) -> String {
+    render_status(report, false)
+}
+
+pub fn render_status_human_colored(report: &StatusReport) -> String {
+    render_status(report, true)
+}
+
+fn render_status(report: &StatusReport, color: bool) -> String {
     if report.claims.is_empty() {
         let mut output = String::from("No active claims.\n");
-        append_problems(&mut output, report);
+        append_problems(&mut output, report, color);
         return output;
     }
 
-    let mut output = String::from(
-        "ISSUE | GEN | TITLE | BRANCH | WORKTREE | BASE | DIFF | OVERLAPS | PR | GITHUB | LOCAL\n\
-         --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---\n",
-    );
+    let mut output = format!("Active claims: {}\n", report.claims.len());
     for status in &report.claims {
-        let title = status.claim.title.as_deref().unwrap_or("-");
+        let title = status.claim.title.as_deref().unwrap_or("(untitled)");
         let worktree = shortened_worktree(&status.claim.worktree);
         let base = format!(
             "{}/{}@{}",
@@ -172,17 +177,17 @@ pub fn render_status_human(report: &StatusReport) -> String {
             status.claim.base_ref,
             short_text(&status.claim.base_sha, 8)
         );
-        let diff = if report.problems.iter().any(|problem| {
+        let changes = if report.problems.iter().any(|problem| {
             problem.claim_id == Some(status.claim.claim_id)
                 && matches!(
                     problem.code,
                     LocalProblemCode::MissingBase | LocalProblemCode::MissingBranch
                 )
         }) {
-            "?".to_owned()
+            "unavailable".to_owned()
         } else {
             format!(
-                "{}/{}u",
+                "{} changed, {} untracked",
                 status.diff.changed_paths.len(),
                 status.diff.untracked_paths.len()
             )
@@ -193,23 +198,62 @@ pub fn render_status_human(report: &StatusReport) -> String {
             .as_ref()
             .map_or_else(|| "-".to_owned(), |pr| format!("#{}", pr.number));
         let local = local_summary(status, &report.problems);
+        let warning = claim_has_warnings(status, &report.problems);
+        let marker = paint(
+            color,
+            if warning { "33" } else { "32" },
+            if warning { "!" } else { "●" },
+        );
         output.push_str(&format!(
-            "#{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}\n",
+            "\n{marker} #{} {}  {}\n",
             status.claim.issue,
             &status.claim.claim_id.to_string()[..8],
-            truncate(title, 24),
-            truncate(&status.claim.branch, 28),
-            truncate(&worktree, 24),
-            truncate(&base, 24),
-            diff,
-            truncate(&overlaps, 28),
-            pr,
-            github_state_name(status.github_state),
-            truncate(&local, 28),
+            title,
         ));
+        append_field(&mut output, color, "Branch", &status.claim.branch);
+        append_field(&mut output, color, "Worktree", &worktree);
+        append_field(&mut output, color, "Base", &base);
+        append_field(&mut output, color, "Changes", &changes);
+        append_field(
+            &mut output,
+            color,
+            "Overlaps",
+            if overlaps == "-" { "none" } else { &overlaps },
+        );
+        append_field(&mut output, color, "Pull request", &pr);
+        append_field(
+            &mut output,
+            color,
+            "GitHub",
+            github_state_name(status.github_state),
+        );
+        append_field(&mut output, color, "Local", &local);
     }
-    append_problems(&mut output, report);
+    append_problems(&mut output, report, color);
     output
+}
+
+fn claim_has_warnings(status: &ClaimStatus, problems: &[LocalProblem]) -> bool {
+    !status.scope_warnings.is_empty()
+        || !status.stack_warnings.is_empty()
+        || problems
+            .iter()
+            .any(|problem| problem.claim_id == Some(status.claim.claim_id))
+        || status.overlaps.iter().any(|overlap| {
+            matches!(
+                overlap.severity,
+                OverlapSeverity::Warning | OverlapSeverity::Blocking
+            )
+        })
+}
+
+fn append_field(output: &mut String, color: bool, label: &str, value: &str) {
+    output.push_str(&format!(
+        "  {}{}{}\n",
+        paint(color, "2", label),
+        " ".repeat(14usize.saturating_sub(label.chars().count())),
+        value
+    ));
 }
 
 fn relationship_summary(overlaps: &[DiffOverlap]) -> String {
@@ -229,7 +273,7 @@ fn relationship_summary(overlaps: &[DiffOverlap]) -> String {
             format!("{}:{}", relationship_name(relationship), claims.len())
         })
         .collect::<Vec<_>>()
-        .join(",")
+        .join(", ")
 }
 
 fn local_summary(status: &ClaimStatus, problems: &[LocalProblem]) -> String {
@@ -250,7 +294,7 @@ fn local_summary(status: &ClaimStatus, problems: &[LocalProblem]) -> String {
     }
 }
 
-fn append_problems(output: &mut String, report: &StatusReport) {
+fn append_problems(output: &mut String, report: &StatusReport, color: bool) {
     if report.problems.is_empty() {
         return;
     }
@@ -273,11 +317,20 @@ fn append_problems(output: &mut String, report: &StatusReport) {
                 .collect::<Vec<_>>(),
         );
         output.push_str(&format!(
-            "- {}{}: {}\n",
+            "{} {}{}: {}\n",
+            paint(color, "31", "✗"),
             problem_code(problem.code),
             issue,
             message
         ));
+    }
+}
+
+fn paint(color: bool, code: &str, value: &str) -> String {
+    if color {
+        format!("\u{1b}[{code}m{value}\u{1b}[0m")
+    } else {
+        value.to_owned()
     }
 }
 
@@ -300,13 +353,6 @@ fn shortened_worktree(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
         .map_or_else(|| "…".to_owned(), |name| format!("…/{name}"))
-}
-
-fn truncate(value: &str, width: usize) -> String {
-    if value.chars().count() <= width {
-        return value.to_owned();
-    }
-    value.chars().take(width - 1).chain(['…']).collect()
 }
 
 fn short_text(value: &str, width: usize) -> String {

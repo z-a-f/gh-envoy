@@ -176,6 +176,46 @@ impl Store {
         Ok(active)
     }
 
+    pub fn all_claims(&self) -> Result<Vec<Claim>, StoreError> {
+        let claims_root = self.root.join("claims");
+        let entries = match fs::read_dir(&claims_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(StoreError::Io {
+                    action: "list claim issues",
+                    path: claims_root,
+                    source,
+                });
+            }
+        };
+        let mut claims = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| StoreError::Io {
+                action: "read claim issue entry",
+                path: claims_root.clone(),
+                source,
+            })?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Some(issue) = entry
+                .file_name()
+                .to_str()
+                .and_then(|value| value.parse::<NonZeroU64>().ok())
+            else {
+                continue;
+            };
+            claims.extend(self.list_claims(issue)?);
+        }
+        claims.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.claim_id.cmp(&right.claim_id))
+        });
+        Ok(claims)
+    }
+
     pub fn read_operation(
         &self,
         operation_id: Uuid,
