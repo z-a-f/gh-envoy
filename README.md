@@ -1,6 +1,6 @@
 # Envoy
 
-Envoy is a GitHub-native coordination verifier for parallel AI-assisted development. It tracks declared worktree ownership for GitHub issues, observes overlap, and reports whether work is structurally sound. Envoy does not run agents or merge changes.
+Envoy is a GitHub-native coordination verifier for parallel AI-assisted development. It tracks declared worktree ownership for GitHub issues, observes overlap, reports whether work is structurally sound, and can run an agent interactively inside an active claimed worktree. Envoy does not decide whether an issue is fixed and never merges changes.
 
 The project builds a single `gh-envoy` binary. Git remains the source of truth: Envoy invokes the Git CLI through a typed process boundary and does not use `libgit2`.
 
@@ -30,7 +30,7 @@ You can also invoke `target/release/gh-envoy` directly. On Windows, Git for Wind
 The basic dogfooding loop is:
 
 1. From any worktree in the target repository, claim an issue with `gh envoy claim 123`.
-2. In an interactive terminal, Envoy opens a nested shell in the new worktree. Start the human or agent doing issue 123 there.
+2. In an interactive terminal, Envoy opens a nested shell in the new worktree. Start the human there, or use `gh envoy run <agent> [PROMPT] -- [AGENT_ARGS...]` to launch an agent from that claimed worktree.
 3. Repeat for other independent issues. Each claim receives its own branch and worktree.
 4. Use `gh envoy list` for claim history and `gh envoy status` for active ownership, overlap, scope, and integrity concerns.
 5. Before publishing or integrating work, run `gh envoy doctor 123`, or `gh envoy doctor --stack 123` for stacked work.
@@ -49,10 +49,11 @@ Choose the claim form that matches the work:
 | Stacked change | `gh envoy claim 124 --onto 123` | Record that issue 124 is based on the exact active generation of issue 123. |
 | Consolidation work | `gh envoy claim 130 --after 123 --after 124` | Record that issue 130 should wait for several issue generations. |
 | Bounded ownership | `gh envoy claim 131 --scope 'src/**' --disallow '.github/workflows/**'` | Declare expected and prohibited paths so status and doctor can flag drift. |
+| Interactive agent | `gh envoy run codex 'Implement the issue' -- exec` | Run a grouped agent process in the current active claimed worktree. |
 | Claim inventory | `gh envoy list` | Show every active and released claim generation. |
 | Automation | `gh envoy status --strict --json` | Consume machine-readable output and fail on coordination warnings. |
 
-Current commands perform no GitHub writes. For GitHub remotes, claim validates issue intent, while status and doctor read issue and exact-branch pull-request facts. Guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
+Current commands perform no GitHub writes. For GitHub remotes, claim validates issue intent, while status and doctor read issue and exact-branch pull-request facts. Guarded push/PR creation, stack shipping, background run management, and optional release cleanup are **future options and are not implemented yet**. Automatic rebasing/restacking, merging, retargeting, and force-pushing remain outside the current command set.
 
 See the [dogfooding guide](docs/dogfooding.md) for complete workflows, stack and dependency behavior, safety gates, configuration, JSON use, and troubleshooting. The [docs index](docs/README.md) separates operator guidance from the normative [product specification](spec.md).
 
@@ -105,6 +106,15 @@ When `gh-envoy` is installed on `PATH`, GitHub CLI exposes it as:
 ```sh
 gh envoy --help
 ```
+
+Run an agent interactively from a worktree owned by an active claim:
+
+```sh
+gh envoy run codex "Implement the acceptance criteria" -- exec
+gh envoy run claude "Review the current diff" -- -p
+```
+
+Arguments after `--` are passed to the agent first; the optional prompt is appended as the final argument. Envoy uses a typed argument vector without a shell, so spaces, metacharacters, Unicode, and empty arguments remain literal. The child inherits the terminal and runs as a Unix session/process-group leader or in a Windows Job Object. A zero child exit records `succeeded`; it describes process lifecycle only and never means the issue is fixed. Nonzero exits and Ctrl-C return Envoy exit 3, with Ctrl-C recorded as child exit 130. Foreground runs refuse `--json` because inherited child output cannot remain a stable JSON stream.
 
 Fresh, unstacked claims provision an isolated branch and worktree from an exact captured base SHA:
 

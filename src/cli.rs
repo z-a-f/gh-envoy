@@ -22,6 +22,9 @@ use crate::list::{
     get_claim_list, list_document, render_claim_list_human, render_claim_list_human_colored,
 };
 use crate::model::{Claim, ReleaseReason, ReleaseReport};
+use crate::run::{
+    ForegroundRunError, ForegroundRunRequest, install_interrupt_handler, run_foreground,
+};
 use crate::status::{
     get_status, render_status_human, render_status_human_colored, status_document,
 };
@@ -46,6 +49,8 @@ pub struct Cli {
 pub enum EnvoyCommand {
     /// Claim an issue for work in an isolated worktree.
     Claim(ClaimArgs),
+    /// Run an agent interactively in the active claimed worktree.
+    Run(RunArgs),
     /// List every recorded claim generation.
     List,
     /// Show active claims and coordination findings.
@@ -54,6 +59,18 @@ pub enum EnvoyCommand {
     Doctor(DoctorArgs),
     /// Release an active claim.
     Release(ReleaseArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[arg(value_name = "AGENT")]
+    pub agent: String,
+
+    #[arg(value_name = "PROMPT")]
+    pub prompt: Option<String>,
+
+    #[arg(last = true, allow_hyphen_values = true, value_name = "AGENT_ARGS")]
+    pub agent_args: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -210,11 +227,85 @@ pub fn main_entry() -> EnvoyExitCode {
 fn run(cli: Cli) -> EnvoyExitCode {
     match cli.command {
         EnvoyCommand::Claim(arguments) => run_claim(arguments, cli.json),
+        EnvoyCommand::Run(arguments) => run_agent(arguments, cli.json),
         EnvoyCommand::List => run_list(cli.json),
         EnvoyCommand::Status(arguments) => run_status(arguments, cli.json),
         EnvoyCommand::Doctor(arguments) => run_doctor(arguments, cli.json),
         EnvoyCommand::Release(arguments) => run_release(arguments, cli.json),
     }
+}
+
+fn run_agent(arguments: RunArgs, json: bool) -> EnvoyExitCode {
+    if json {
+        return render_error(
+            "run",
+            true,
+            "refused",
+            "--json cannot be combined with an interactive run because the child inherits stdout and stderr",
+            true,
+        );
+    }
+    if matches!(
+        arguments.agent.as_str(),
+        "list" | "status" | "wait" | "stop"
+    ) {
+        return render_error(
+            "run",
+            false,
+            "refused",
+            &format!(
+                "run {} is reserved for run lifecycle operations",
+                arguments.agent
+            ),
+            true,
+        );
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            return render_error("run", false, "current_directory", &error.to_string(), false);
+        }
+    };
+    let interrupted = match install_interrupt_handler() {
+        Ok(interrupted) => interrupted,
+        Err(error) => return render_run_error(&error),
+    };
+    let request = ForegroundRunRequest {
+        agent: arguments.agent,
+        prompt: arguments.prompt,
+        agent_args: arguments.agent_args,
+    };
+    match run_foreground(&cwd, request, interrupted) {
+        Ok(run) => {
+            let _ = writeln!(
+                io::stdout().lock(),
+                "Run {} {} (child exit {})",
+                run.run_id,
+                run.state.as_str(),
+                run.exit_code.unwrap_or(1)
+            );
+            if run.exit_code == Some(0) {
+                EnvoyExitCode::Success
+            } else {
+                EnvoyExitCode::OperationalError
+            }
+        }
+        Err(error) => render_run_error(&error),
+    }
+}
+
+fn render_run_error(error: &ForegroundRunError) -> EnvoyExitCode {
+    render_error(
+        "run",
+        false,
+        if error.is_refusal() {
+            "refused"
+        } else {
+            "operational_error"
+        },
+        &error.to_string(),
+        error.is_refusal(),
+    )
 }
 
 fn run_list(json: bool) -> EnvoyExitCode {
