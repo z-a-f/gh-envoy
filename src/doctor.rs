@@ -10,10 +10,14 @@ use uuid::Uuid;
 
 use crate::command::{CommandRunner, text_from_utf8_output};
 use crate::config::{Config, ConfigError};
+use crate::conflict::{OverlapRelationship, OverlapSeverity, ScopeWarningReason};
 use crate::exit::EnvoyExitCode;
 use crate::git::{GitCli, RepositoryContext, RepositoryError};
-use crate::model::SCHEMA_VERSION;
-use crate::observation::{LocalProblem, LocalProblemCode, ObservationError, observe_repository};
+use crate::model::{Claim, SCHEMA_VERSION};
+use crate::observation::{
+    LocalProblem, LocalProblemCode, ObservationError, observe_claims, observe_repository,
+};
+use crate::stack::{StackError, StackNode, StackProblem, resolve_stack, wait_for_cycles};
 use crate::store::Store;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -253,6 +257,101 @@ fn worst_gate(gates: GateRollups) -> GateRollup {
         .unwrap_or(GateRollup::Ok)
 }
 
+pub fn coordination_checks(
+    observed: &crate::observation::ClaimObservation,
+) -> (Vec<DoctorCheck>, Vec<String>) {
+    let mut checks = Vec::new();
+    let mut recommendations = Vec::new();
+    for overlap in &observed.overlaps {
+        let status = match overlap.severity {
+            OverlapSeverity::Info => CheckStatus::Pass,
+            OverlapSeverity::Warning => CheckStatus::Warn,
+            OverlapSeverity::Blocking => CheckStatus::Fail,
+        };
+        checks.push(
+            DoctorCheck::new(
+                "merge.overlap",
+                CheckGate::Merge,
+                "Diff overlap",
+                status,
+                format!(
+                    "{} overlap with issue #{} generation {} across {} path(s)",
+                    relationship_name(overlap.relationship),
+                    overlap.with_issue,
+                    &overlap.with_claim_id.to_string()[..8],
+                    overlap.shared_paths.len()
+                ),
+            )
+            .with_evidence(json!({
+                "issue": observed.claim.issue,
+                "claim_id": observed.claim.claim_id,
+                "overlap": overlap,
+            })),
+        );
+        if !matches!(overlap.severity, OverlapSeverity::Info) {
+            recommendations.push(format!(
+                "Resolve overlap between issue #{} and issue #{} before merge",
+                observed.claim.issue, overlap.with_issue
+            ));
+        }
+    }
+    for warning in &observed.scope_warnings {
+        checks.push(
+            DoctorCheck::new(
+                "merge.scope",
+                CheckGate::Merge,
+                "Declared scope",
+                CheckStatus::Warn,
+                format!(
+                    "{} {}",
+                    warning.path,
+                    match warning.reason {
+                        ScopeWarningReason::OutsideAllowedScope => "is outside allowed scope",
+                        ScopeWarningReason::InsideDisallowedScope => "is inside disallowed scope",
+                    }
+                ),
+            )
+            .with_evidence(json!({
+                "issue": observed.claim.issue,
+                "claim_id": observed.claim.claim_id,
+                "warning": warning,
+            })),
+        );
+    }
+    if !observed.claim.wait_for.is_empty() {
+        let (changed, untracked) = observed.diff.as_ref().map_or((0, 0), |diff| {
+            (diff.changed_paths.len(), diff.untracked_paths.len())
+        });
+        checks.push(
+            DoctorCheck::new(
+                "merge.consolidation_diff",
+                CheckGate::Merge,
+                "Consolidation diff",
+                CheckStatus::Pass,
+                "consolidation diff may appear oversized until multi-parent diff bases are supported",
+            )
+            .with_evidence(json!({
+                "issue": observed.claim.issue,
+                "claim_id": observed.claim.claim_id,
+                "changed_paths": changed,
+                "untracked_paths": untracked,
+                "wait_for": observed.claim.wait_for,
+            })),
+        );
+    }
+    (checks, recommendations)
+}
+
+fn relationship_name(relationship: OverlapRelationship) -> &'static str {
+    match relationship {
+        OverlapRelationship::Sibling => "sibling",
+        OverlapRelationship::Unrelated => "unrelated",
+        OverlapRelationship::Ancestor => "ancestor",
+        OverlapRelationship::Descendant => "descendant",
+        OverlapRelationship::Consolidation => "consolidation",
+    }
+}
+
 pub fn rollup_gate(checks: &[DoctorCheck]) -> GateRollup {
     checks
         .iter()
@@ -320,6 +419,29 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
             check.message,
         ));
     }
+    if !report.nodes.is_empty() {
+        output.push_str("\nStack nodes (root -> target):\n");
+        for node in &report.nodes {
+            output.push_str(&format!(
+                "\n#{} {}: {} (integrity={} publish={} merge={})\n",
+                node.issue,
+                &node.claim_id.to_string()[..8],
+                node.status.as_str(),
+                node.gates.integrity.as_str(),
+                node.gates.publish.as_str(),
+                node.gates.merge.as_str(),
+            ));
+            for check in &node.checks {
+                output.push_str(&format!(
+                    "  {} [{}] {}: {}\n",
+                    check.status.symbol(),
+                    check.gate.as_str(),
+                    check.title,
+                    check.message,
+                ));
+            }
+        }
+    }
     output.push_str("\nRecommendations:\n");
     if report.recommendations.is_empty() {
         output.push_str("- None\n");
@@ -339,6 +461,13 @@ pub fn redact_doctor_paths(report: &DoctorReport) -> DoctorReport {
             collect_absolute_paths(evidence, &mut replacements);
         }
     }
+    for node in &report.nodes {
+        for check in &node.checks {
+            if let Some(evidence) = &check.evidence {
+                collect_absolute_paths(evidence, &mut replacements);
+            }
+        }
+    }
     replacements.sort_by_key(|item| std::cmp::Reverse(item.0.len()));
     replacements.dedup_by(|left, right| left.0 == right.0);
     for check in &mut redacted.checks {
@@ -349,6 +478,17 @@ pub fn redact_doctor_paths(report: &DoctorReport) -> DoctorReport {
     }
     for recommendation in &mut redacted.recommendations {
         *recommendation = redact_text(recommendation, &replacements);
+    }
+    for node in &mut redacted.nodes {
+        for check in &mut node.checks {
+            check.message = redact_text(&check.message, &replacements);
+            if let Some(evidence) = &mut check.evidence {
+                redact_value(evidence, &replacements);
+            }
+        }
+        for recommendation in &mut node.recommendations {
+            *recommendation = redact_text(recommendation, &replacements);
+        }
     }
     redacted
 }
@@ -455,6 +595,7 @@ pub fn doctor_repository<R: CommandRunner>(
         )
         .required(),
     ];
+    let mut recommendations = Vec::new();
     let selected = observation
         .claims
         .iter()
@@ -480,6 +621,27 @@ pub fn doctor_repository<R: CommandRunner>(
             .required(),
         );
     }
+
+    let store = Store::new(repository.store_root());
+    let roots = issue.map_or_else(
+        || {
+            observation
+                .claims
+                .iter()
+                .map(|observed| observed.claim.issue)
+                .collect::<Vec<_>>()
+        },
+        |issue| vec![issue],
+    );
+    let active = observation
+        .claims
+        .iter()
+        .map(|observed| observed.claim.clone())
+        .collect::<Vec<_>>();
+    let (stack_checks, stack_recommendations) =
+        stack_checks(runner, &repository.main_worktree, &store, &active, &roots)?;
+    checks.extend(stack_checks);
+    recommendations.extend(stack_recommendations);
 
     let ownership = ownership_groups(&observation.claims);
     for observed in selected {
@@ -577,6 +739,9 @@ pub fn doctor_repository<R: CommandRunner>(
                 "claim_ids": owners.iter().map(|owner| owner.1).collect::<Vec<_>>(),
             })),
         );
+        let (coordination, coordination_recommendations) = coordination_checks(observed);
+        checks.extend(coordination);
+        recommendations.extend(coordination_recommendations);
     }
 
     let selected_operations = observation
@@ -584,7 +749,6 @@ pub fn doctor_repository<R: CommandRunner>(
         .iter()
         .filter(|operation| issue.is_none_or(|issue| operation.issue == issue))
         .collect::<Vec<_>>();
-    let mut recommendations = Vec::new();
     if selected_operations.is_empty() {
         checks.push(
             DoctorCheck::new(
@@ -633,6 +797,481 @@ pub fn doctor_repository<R: CommandRunner>(
         recommendations,
         Utc::now(),
     ))
+}
+
+pub fn doctor_stack<R: CommandRunner>(
+    runner: &R,
+    cwd: &Path,
+    target_issue: NonZeroU64,
+) -> Result<DoctorReport, DoctorError> {
+    let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
+    let config = Config::load(&common_dir)?;
+    let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
+    let store = Store::new(repository.store_root());
+    let active = store.active_claims()?;
+    let resolution = resolve_stack(&store, &active, target_issue)?;
+    let mut checks = Vec::new();
+    let mut recommendations = Vec::new();
+    let (mut graph_checks, graph_recommendations) = stack_checks(
+        runner,
+        &repository.main_worktree,
+        &store,
+        &active,
+        &[target_issue],
+    )?;
+    checks.append(&mut graph_checks);
+    recommendations.extend(graph_recommendations);
+
+    let active_ids = active
+        .iter()
+        .map(|claim| claim.claim_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut claims = active.clone();
+    for node in &resolution.nodes {
+        if !active_ids.contains(&node.claim.claim_id) {
+            claims.push(node.claim.clone());
+        }
+    }
+    let observation = observe_claims(runner, cwd, claims)?;
+    let active_observed = observation
+        .claims
+        .iter()
+        .filter(|observed| active_ids.contains(&observed.claim.claim_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ownership = ownership_groups(&active_observed);
+    let mut nodes = Vec::new();
+    for node in &resolution.nodes {
+        let Some(observed) = observation
+            .claims
+            .iter()
+            .find(|observed| observed.claim.claim_id == node.claim.claim_id)
+        else {
+            continue;
+        };
+        let mut node_checks = basic_claim_checks(
+            observed,
+            &observation.problems,
+            if node.active { Some(&ownership) } else { None },
+        );
+        let mut node_recommendations = Vec::new();
+        if node.active {
+            let mut active_only = observed.clone();
+            active_only
+                .overlaps
+                .retain(|overlap| active_ids.contains(&overlap.with_claim_id));
+            let (coordination, coordination_recommendations) = coordination_checks(&active_only);
+            node_checks.extend(coordination);
+            node_recommendations.extend(coordination_recommendations);
+        }
+        if let Some(release) = &node.release {
+            node_checks.push(
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Released generation",
+                    CheckStatus::Fail,
+                    "this exact stack generation has been released",
+                )
+                .required()
+                .with_evidence(json!({"release": release})),
+            );
+        }
+        nodes.push(DoctorNodeReport::new(
+            node.claim.issue,
+            node.claim.claim_id,
+            node_checks,
+            node_recommendations,
+        ));
+    }
+    Ok(DoctorReport::new(
+        DoctorSubject {
+            repo: repository.repository,
+            issue: Some(target_issue),
+            stack: true,
+        },
+        checks,
+        recommendations,
+        Utc::now(),
+    )
+    .with_nodes(nodes))
+}
+
+fn basic_claim_checks(
+    observed: &crate::observation::ClaimObservation,
+    problems: &[LocalProblem],
+    ownership: Option<&BTreeMap<PathBuf, Vec<(NonZeroU64, Uuid)>>>,
+) -> Vec<DoctorCheck> {
+    let claim = &observed.claim;
+    let evidence = || json!({"issue": claim.issue, "claim_id": claim.claim_id});
+    let mut checks = vec![
+        DoctorCheck::new(
+            "integrity.claim_schema",
+            CheckGate::Integrity,
+            "Claim schema",
+            CheckStatus::Pass,
+            "claim schema and persisted location are valid",
+        )
+        .required()
+        .with_evidence(evidence()),
+        problem_check(
+            claim.issue,
+            claim.claim_id,
+            problems,
+            "integrity.worktree",
+            "Worktree",
+            &[
+                LocalProblemCode::MissingWorktree,
+                LocalProblemCode::WorktreeMismatch,
+            ],
+            "claimed worktree exists, is registered, and is attached to the claimed branch",
+        ),
+        problem_check(
+            claim.issue,
+            claim.claim_id,
+            problems,
+            "integrity.branch",
+            "Branch",
+            &[LocalProblemCode::MissingBranch],
+            "claimed branch resolves to a local commit",
+        ),
+        problem_check(
+            claim.issue,
+            claim.claim_id,
+            problems,
+            "integrity.base",
+            "Captured base",
+            &[LocalProblemCode::MissingBase],
+            "captured base resolves to the exact commit",
+        ),
+    ];
+    checks.push(if let Some(diff) = &observed.diff {
+        DoctorCheck::new(
+            "integrity.diff",
+            CheckGate::Integrity,
+            "Diff derivation",
+            CheckStatus::Pass,
+            format!(
+                "derived {} changed and {} untracked paths",
+                diff.changed_paths.len(),
+                diff.untracked_paths.len()
+            ),
+        )
+        .with_evidence(evidence())
+    } else {
+        DoctorCheck::new(
+            "integrity.diff",
+            CheckGate::Integrity,
+            "Diff derivation",
+            CheckStatus::Skip,
+            "diff cannot be derived until branch and base checks pass",
+        )
+        .with_evidence(evidence())
+    });
+    if let Some(ownership) = ownership {
+        let owners = ownership
+            .get(&canonical_key(&claim.worktree))
+            .expect("active claim has an owner group");
+        checks.push(
+            DoctorCheck::new(
+                "integrity.ownership",
+                CheckGate::Integrity,
+                "Declared worktree ownership",
+                if owners.len() > 1 {
+                    CheckStatus::Fail
+                } else {
+                    CheckStatus::Pass
+                },
+                if owners.len() > 1 {
+                    "multiple active claims declare the same canonical worktree"
+                } else {
+                    "canonical worktree has one active owner"
+                },
+            )
+            .required()
+            .with_evidence(json!({"worktree": claim.worktree, "owners": owners})),
+        );
+    }
+    checks
+}
+
+fn stack_checks<R: CommandRunner>(
+    runner: &R,
+    main_worktree: &Path,
+    store: &Store,
+    active: &[Claim],
+    roots: &[NonZeroU64],
+) -> Result<(Vec<DoctorCheck>, Vec<String>), DoctorError> {
+    let mut checks = Vec::new();
+    let mut recommendations = Vec::new();
+    for cycle in wait_for_cycles(active, roots) {
+        checks.push(
+            DoctorCheck::new(
+                "publish.wait_for_cycle",
+                CheckGate::Publish,
+                "Consolidation dependency cycle",
+                CheckStatus::Error,
+                "wait_for dependencies contain a cycle",
+            )
+            .required()
+            .with_evidence(json!({"cycle": cycle})),
+        );
+    }
+    let git = GitCli::new(runner);
+    let mut assessed = std::collections::BTreeSet::new();
+    for root in roots {
+        let resolution = resolve_stack(store, active, *root)?;
+        if let Some(problem) = &resolution.problem {
+            let check = stack_problem_check(problem);
+            if !checks.contains(&check) {
+                checks.push(check);
+            }
+            if let StackProblem::MissingParent {
+                child_claim_id,
+                parent_issue,
+                parent_claim_id,
+                ..
+            } = problem
+            {
+                recommendations.push(format!(
+                    "Restack child generation {} manually; exact parent #{} generation {} is unavailable",
+                    &child_claim_id.to_string()[..8],
+                    parent_issue,
+                    &parent_claim_id.to_string()[..8]
+                ));
+            }
+        }
+        for pair in resolution.nodes.windows(2) {
+            let parent = &pair[0];
+            let child = &pair[1];
+            if assessed.insert(child.claim.claim_id) {
+                let (mut drift_checks, recommendation) =
+                    parent_drift_checks(&git, main_worktree, parent, &child.claim)?;
+                checks.append(&mut drift_checks);
+                recommendations.extend(recommendation);
+            }
+        }
+    }
+    Ok((checks, recommendations))
+}
+
+fn stack_problem_check(problem: &StackProblem) -> DoctorCheck {
+    match problem {
+        StackProblem::BaseCycle { cycle } => DoctorCheck::new(
+            "publish.base_cycle",
+            CheckGate::Publish,
+            "Stack dependency cycle",
+            CheckStatus::Error,
+            "base_claim_id dependencies contain a cycle",
+        )
+        .required()
+        .with_evidence(json!({"cycle": cycle})),
+        StackProblem::MissingParent {
+            child_claim_id,
+            parent_issue,
+            parent_claim_id,
+            replacement_claim_id,
+        } => DoctorCheck::new(
+            "publish.parent_generation",
+            CheckGate::Publish,
+            "Parent generation",
+            CheckStatus::Fail,
+            "the exact recorded parent generation is missing",
+        )
+        .required()
+        .with_evidence(json!({
+            "child_claim_id": child_claim_id,
+            "parent_issue": parent_issue,
+            "parent_claim_id": parent_claim_id,
+            "replacement_claim_id": replacement_claim_id,
+        })),
+        StackProblem::MissingTarget { issue } => DoctorCheck::new(
+            "integrity.claim_exists",
+            CheckGate::Integrity,
+            "Active claim",
+            CheckStatus::Fail,
+            format!("issue #{issue} has no active local claim"),
+        )
+        .required(),
+        StackProblem::DuplicateTarget { issue } => DoctorCheck::new(
+            "integrity.claim_exists",
+            CheckGate::Integrity,
+            "Active claim",
+            CheckStatus::Error,
+            format!("issue #{issue} has multiple active local claims"),
+        )
+        .required(),
+    }
+}
+
+fn parent_drift_checks<R: CommandRunner>(
+    git: &GitCli<'_, R>,
+    main_worktree: &Path,
+    parent: &StackNode,
+    child: &Claim,
+) -> Result<(Vec<DoctorCheck>, Vec<String>), DoctorError> {
+    let evidence = || {
+        json!({
+            "issue": child.issue,
+            "claim_id": child.claim_id,
+            "parent_issue": parent.claim.issue,
+            "parent_claim_id": parent.claim.claim_id,
+            "captured_sha": child.base_sha,
+        })
+    };
+    if let Some(release) = &parent.release {
+        return Ok((
+            vec![
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Parent generation",
+                    CheckStatus::Fail,
+                    "the exact recorded parent generation has been released",
+                )
+                .required()
+                .with_evidence(json!({"relationship": evidence(), "release": release})),
+            ],
+            vec![manual_restack_recommendation(child, &parent.claim, false)],
+        ));
+    }
+    if !parent.active {
+        return Ok((
+            vec![
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Parent generation",
+                    CheckStatus::Error,
+                    "the exact parent generation is neither active nor released",
+                )
+                .required()
+                .with_evidence(evidence()),
+            ],
+            Vec::new(),
+        ));
+    }
+    let reference = format!("refs/heads/{}^{{commit}}", parent.claim.branch);
+    let output = git.attempt(
+        main_worktree,
+        ["rev-parse", "--verify", "--quiet", &reference],
+    )?;
+    if output.exit_code != Some(0) {
+        return Ok((
+            vec![
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Parent generation",
+                    CheckStatus::Error,
+                    "the exact parent branch does not resolve",
+                )
+                .required()
+                .with_evidence(evidence()),
+            ],
+            Vec::new(),
+        ));
+    }
+    let tip = text_from_utf8_output(&output.stdout, "git rev-parse parent branch")
+        .map_err(DoctorError::InvalidGitOutput)?
+        .to_owned();
+    if tip == child.base_sha {
+        return Ok((
+            vec![
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Parent generation",
+                    CheckStatus::Pass,
+                    "captured parent generation is current",
+                )
+                .required()
+                .with_evidence(json!({"relationship": evidence(), "parent_tip": tip})),
+            ],
+            Vec::new(),
+        ));
+    }
+    let ancestry = git.attempt(
+        main_worktree,
+        [
+            "merge-base",
+            "--is-ancestor",
+            child.base_sha.as_str(),
+            tip.as_str(),
+        ],
+    )?;
+    if ancestry.exit_code == Some(0) {
+        Ok((
+            vec![
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Parent generation",
+                    CheckStatus::Pass,
+                    "captured parent SHA remains in current parent history",
+                )
+                .required()
+                .with_evidence(json!({"relationship": evidence(), "parent_tip": tip})),
+                DoctorCheck::new(
+                    "merge.parent_advanced",
+                    CheckGate::Merge,
+                    "Parent branch advanced",
+                    CheckStatus::Warn,
+                    "parent branch advanced after the child captured its base",
+                )
+                .with_evidence(json!({"relationship": evidence(), "parent_tip": tip})),
+            ],
+            Vec::new(),
+        ))
+    } else if ancestry.exit_code == Some(1) {
+        Ok((
+            vec![
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Parent generation",
+                    CheckStatus::Fail,
+                    "captured parent SHA is no longer in current parent history",
+                )
+                .required()
+                .with_evidence(json!({"relationship": evidence(), "parent_tip": tip})),
+            ],
+            vec![manual_restack_recommendation(child, &parent.claim, true)],
+        ))
+    } else {
+        Ok((
+            vec![
+                DoctorCheck::new(
+                    "publish.parent_generation",
+                    CheckGate::Publish,
+                    "Parent generation",
+                    CheckStatus::Error,
+                    "could not compare captured and current parent history",
+                )
+                .required()
+                .with_evidence(json!({
+                    "relationship": evidence(),
+                    "parent_tip": tip,
+                    "exit_code": ancestry.exit_code,
+                })),
+            ],
+            Vec::new(),
+        ))
+    }
+}
+
+fn manual_restack_recommendation(child: &Claim, parent: &Claim, active_parent: bool) -> String {
+    let effective_base = if active_parent {
+        parent.branch.clone()
+    } else {
+        format!("{}/{}", parent.base_remote, parent.base_ref)
+    };
+    format!(
+        "Restack manually: git -C {} rebase --onto {} {}",
+        child.worktree.display(),
+        effective_base,
+        child.base_sha
+    )
 }
 
 fn problem_check(
@@ -799,4 +1438,14 @@ pub enum DoctorError {
     Repository(#[from] RepositoryError),
     #[error(transparent)]
     Config(#[from] ConfigError),
+    #[error(transparent)]
+    Stack(#[from] StackError),
+    #[error(transparent)]
+    Runner(#[from] crate::command::RunnerError),
+    #[error("invalid Git output: {0}")]
+    InvalidGitOutput(String),
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
+    #[error(transparent)]
+    Observation(#[from] ObservationError),
 }

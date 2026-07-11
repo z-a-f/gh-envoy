@@ -1,6 +1,6 @@
 use chrono::{TimeZone, Utc};
-use gh_envoy::model::{Claim, ReleaseMarker, ReleaseReason, SCHEMA_VERSION};
-use gh_envoy::stack::{StackProblem, resolve_stack};
+use gh_envoy::model::{Claim, ReleaseMarker, ReleaseReason, SCHEMA_VERSION, WaitForRef};
+use gh_envoy::stack::{StackProblem, resolve_stack, wait_for_cycles};
 use gh_envoy::store::Store;
 use std::num::NonZeroU64;
 use tempfile::TempDir;
@@ -75,6 +75,31 @@ fn exact_base_cycle_has_no_false_root_order() {
         Some(StackProblem::BaseCycle {
             cycle: vec![first.claim_id, second.claim_id, first.claim_id],
         })
+    );
+}
+
+#[test]
+fn wait_for_cycles_are_detected_independently_by_issue() {
+    let mut first = claim(30, uuid(6), None);
+    let mut second = claim(31, uuid(7), None);
+    first.wait_for.push(WaitForRef {
+        issue: second.issue,
+        claim_id: None,
+    });
+    second.wait_for.push(WaitForRef {
+        issue: first.issue,
+        claim_id: Some(first.claim_id),
+    });
+
+    assert_eq!(
+        wait_for_cycles(&[first.clone(), second.clone()], &[first.issue]),
+        vec![vec![first.issue, second.issue, first.issue]]
+    );
+    assert_eq!(
+        resolve_stack(&Fixture::new().store, &[first.clone()], first.issue)
+            .expect("base graph remains valid")
+            .problem,
+        None
     );
 }
 

@@ -8,7 +8,9 @@ use serde::Serialize;
 
 use crate::command::SystemRunner;
 use crate::config::Config;
-use crate::doctor::{doctor_document, doctor_repository, redact_doctor_paths, render_doctor_human};
+use crate::doctor::{
+    doctor_document, doctor_repository, doctor_stack, redact_doctor_paths, render_doctor_human,
+};
 use crate::exit::EnvoyExitCode;
 use crate::git::RepositoryContext;
 use crate::lifecycle::{ClaimOptions, LifecycleError, claim_issue_with_options, release_claim};
@@ -167,9 +169,6 @@ fn run(cli: Cli) -> EnvoyExitCode {
 }
 
 fn run_doctor(arguments: DoctorArgs, json: bool) -> EnvoyExitCode {
-    if arguments.stack.is_some() {
-        return run_stub("doctor --stack", json);
-    }
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -182,7 +181,12 @@ fn run_doctor(arguments: DoctorArgs, json: bool) -> EnvoyExitCode {
             );
         }
     };
-    match doctor_repository(&SystemRunner, &cwd, arguments.issue) {
+    let report = if let Some(target) = arguments.stack {
+        doctor_stack(&SystemRunner, &cwd, target)
+    } else {
+        doctor_repository(&SystemRunner, &cwd, arguments.issue)
+    };
+    match report {
         Ok(report) => {
             let exit_code = report.exit_code();
             if json {
@@ -405,29 +409,6 @@ fn write_json(value: &impl Serialize) {
     if serde_json::to_writer(io::stdout().lock(), value).is_ok() {
         let _ = writeln!(io::stdout().lock());
     }
-}
-
-fn run_stub(command: &'static str, json: bool) -> EnvoyExitCode {
-    let message = format!("{command} is not implemented yet");
-
-    if json {
-        let envelope = ErrorEnvelope {
-            schema_version: SCHEMA_VERSION,
-            command,
-            status: "error",
-            error: ErrorBody {
-                code: "not_implemented",
-                message: &message,
-            },
-        };
-        if serde_json::to_writer(io::stdout().lock(), &envelope).is_ok() {
-            let _ = writeln!(io::stdout().lock());
-        }
-    } else {
-        let _ = writeln!(io::stderr().lock(), "error: {message}");
-    }
-
-    EnvoyExitCode::OperationalError
 }
 
 fn parse_issue(value: &str) -> Result<NonZeroU64, String> {

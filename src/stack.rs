@@ -105,6 +105,7 @@ pub fn resolve_stack(
                 .map(|node| node.claim.claim_id)
                 .collect::<Vec<_>>();
             cycle.push(parent_claim_id);
+            let cycle = normalize_uuid_cycle(cycle);
             return Ok(StackResolution {
                 nodes: Vec::new(),
                 problem: Some(StackProblem::BaseCycle { cycle }),
@@ -127,6 +128,84 @@ pub fn resolve_stack(
         };
         current = parent;
     }
+}
+
+fn normalize_uuid_cycle(mut cycle: Vec<Uuid>) -> Vec<Uuid> {
+    cycle.pop();
+    let position = cycle
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, claim_id)| **claim_id)
+        .map_or(0, |(position, _)| position);
+    cycle.rotate_left(position);
+    cycle.push(cycle[0]);
+    cycle
+}
+
+pub fn wait_for_cycles(active: &[Claim], roots: &[NonZeroU64]) -> Vec<Vec<NonZeroU64>> {
+    let by_issue = active
+        .iter()
+        .map(|claim| (claim.issue, claim))
+        .collect::<BTreeMap<_, _>>();
+    let mut starts = if roots.is_empty() {
+        by_issue.keys().copied().collect::<Vec<_>>()
+    } else {
+        roots.to_vec()
+    };
+    starts.sort();
+    starts.dedup();
+    let mut visited = BTreeSet::new();
+    let mut cycles = BTreeSet::new();
+    for start in starts {
+        walk_wait_graph(start, &by_issue, &mut Vec::new(), &mut visited, &mut cycles);
+    }
+    cycles.into_iter().collect()
+}
+
+fn walk_wait_graph(
+    issue: NonZeroU64,
+    by_issue: &BTreeMap<NonZeroU64, &Claim>,
+    path: &mut Vec<NonZeroU64>,
+    visited: &mut BTreeSet<NonZeroU64>,
+    cycles: &mut BTreeSet<Vec<NonZeroU64>>,
+) {
+    if let Some(position) = path.iter().position(|candidate| *candidate == issue) {
+        let mut cycle = path[position..].to_vec();
+        cycle.push(issue);
+        cycles.insert(normalize_issue_cycle(cycle));
+        return;
+    }
+    if visited.contains(&issue) {
+        return;
+    }
+    let Some(claim) = by_issue.get(&issue) else {
+        return;
+    };
+    path.push(issue);
+    let mut dependencies = claim
+        .wait_for
+        .iter()
+        .map(|reference| reference.issue)
+        .collect::<Vec<_>>();
+    dependencies.sort();
+    dependencies.dedup();
+    for dependency in dependencies {
+        walk_wait_graph(dependency, by_issue, path, visited, cycles);
+    }
+    path.pop();
+    visited.insert(issue);
+}
+
+fn normalize_issue_cycle(mut cycle: Vec<NonZeroU64>) -> Vec<NonZeroU64> {
+    cycle.pop();
+    let position = cycle
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, issue)| **issue)
+        .map_or(0, |(position, _)| position);
+    cycle.rotate_left(position);
+    cycle.push(cycle[0]);
+    cycle
 }
 
 #[derive(Debug, Error)]

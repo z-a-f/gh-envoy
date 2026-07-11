@@ -20,7 +20,7 @@ fn help_identifies_the_github_extension_entrypoint() {
 }
 
 #[test]
-fn stack_doctor_stub_fails_explicitly_without_creating_store_state() {
+fn stack_doctor_reports_a_missing_target_without_creating_store_state() {
     let repository = TempDir::new().expect("temporary repository");
     run_git(repository.path(), &["init", "-q"]);
 
@@ -28,15 +28,15 @@ fn stack_doctor_stub_fails_explicitly_without_creating_store_state() {
         .current_dir(repository.path())
         .args(["doctor", "--stack", "1"])
         .output()
-        .expect("run command stub");
+        .expect("run stack doctor");
 
-    assert_eq!(output.status.code(), Some(3));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.status.code(), Some(2));
     assert!(
-        String::from_utf8(output.stderr)
-            .expect("stderr is UTF-8")
-            .contains("is not implemented yet")
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("no active local claim")
     );
+    assert!(output.stderr.is_empty());
     assert!(!repository.path().join(".git/envoy").exists());
 }
 

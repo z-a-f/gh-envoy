@@ -64,11 +64,32 @@ pub fn observe_repository<R: CommandRunner>(
     let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
     let config = Config::load(&common_dir)?;
     let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
-    let git = GitCli::new(runner);
-    let worktrees = list_worktrees(&git, &repository.main_worktree)?;
     let store = Store::new(repository.store_root());
     let claims = store.active_claims()?;
     let operations = store.list_operations()?;
+    observe_claim_set(runner, &repository, &config, claims, operations)
+}
+
+pub fn observe_claims<R: CommandRunner>(
+    runner: &R,
+    cwd: &Path,
+    claims: Vec<Claim>,
+) -> Result<LocalObservation, ObservationError> {
+    let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
+    let config = Config::load(&common_dir)?;
+    let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
+    observe_claim_set(runner, &repository, &config, claims, Vec::new())
+}
+
+fn observe_claim_set<R: CommandRunner>(
+    runner: &R,
+    repository: &RepositoryContext,
+    config: &Config,
+    claims: Vec<Claim>,
+    operations: Vec<OperationRecord>,
+) -> Result<LocalObservation, ObservationError> {
+    let git = GitCli::new(runner);
+    let worktrees = list_worktrees(&git, &repository.main_worktree)?;
     let mut problems = operations
         .iter()
         .map(|operation| LocalProblem {
