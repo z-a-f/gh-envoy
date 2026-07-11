@@ -7,6 +7,7 @@ use gh_envoy::command::SystemRunner;
 use gh_envoy::doctor::{CheckStatus, GateRollup, doctor_repository};
 use gh_envoy::model::{
     Claim, DeclaredScope, OperationKind, OperationPhase, OperationRecord, SCHEMA_VERSION,
+    WaitForRef,
 };
 use gh_envoy::store::Store;
 use tempfile::TempDir;
@@ -149,6 +150,39 @@ fn observation_failure_is_distinct_from_corrupt_store() {
     assert!(report.checks.iter().any(|check| {
         check.id == "integrity.observation" && check.status == CheckStatus::Error && check.required
     }));
+}
+
+#[test]
+fn base_and_wait_for_cycles_are_publish_errors() {
+    let fixture = RepositoryFixture::new();
+    let base = fixture.git_stdout(fixture.repository(), &["rev-parse", "HEAD"]);
+    let first_worktree = fixture.add_worktree("cycle-first", &base);
+    let second_worktree = fixture.add_worktree("cycle-second", &base);
+    let mut first = fixture.claim(47, "cycle-first", &first_worktree, &base);
+    let mut second = fixture.claim(48, "cycle-second", &second_worktree, &base);
+    first.base_issue = Some(second.issue);
+    first.base_claim_id = Some(second.claim_id);
+    second.base_issue = Some(first.issue);
+    second.base_claim_id = Some(first.claim_id);
+    first.wait_for.push(WaitForRef {
+        issue: second.issue,
+        claim_id: Some(second.claim_id),
+    });
+    second.wait_for.push(WaitForRef {
+        issue: first.issue,
+        claim_id: None,
+    });
+    fixture.persist(&first);
+    fixture.persist(&second);
+
+    let report = doctor_repository(&SystemRunner, fixture.repository(), None).expect("run doctor");
+
+    assert_eq!(report.status, GateRollup::Error);
+    for id in ["publish.base_cycle", "publish.wait_for_cycle"] {
+        assert!(report.checks.iter().any(|check| {
+            check.id == id && check.status == CheckStatus::Error && check.required
+        }));
+    }
 }
 
 #[test]

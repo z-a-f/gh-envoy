@@ -184,6 +184,131 @@ fn after_captures_active_generation_and_never_infers_absent_generation() {
 }
 
 #[test]
+fn stack_doctor_orders_exact_generations_root_to_target() {
+    let fixture = RepositoryFixture::with_remote();
+    let parent = fixture.envoy_json(&["claim", "301", "--json"], 0);
+    let child = fixture.envoy_json(&["claim", "302", "--onto", "301", "--json"], 0);
+
+    let report = fixture.envoy_json(&["doctor", "--stack", "302", "--json"], 0);
+
+    assert_eq!(report["doctor"]["subject"]["stack"], true);
+    assert_eq!(report["doctor"]["nodes"][0]["issue"], 301);
+    assert_eq!(report["doctor"]["nodes"][1]["issue"], 302);
+    assert_eq!(
+        report["doctor"]["nodes"][0]["claim_id"],
+        parent["claim"]["claim_id"]
+    );
+    assert_eq!(
+        report["doctor"]["nodes"][1]["claim_id"],
+        child["claim"]["claim_id"]
+    );
+    assert_eq!(report["doctor"]["gates"]["publish"], "ok");
+}
+
+#[test]
+fn parent_advance_warns_merge_but_rewrite_blocks_publish() {
+    let fixture = RepositoryFixture::with_remote();
+    let parent = fixture.envoy_json(&["claim", "311", "--json"], 0);
+    let parent_worktree = PathBuf::from(parent["claim"]["worktree"].as_str().unwrap());
+    fixture.envoy_json(&["claim", "312", "--onto", "311", "--json"], 0);
+    fs::write(parent_worktree.join("advance.txt"), "advance\n").expect("advance parent");
+    git(&parent_worktree, &["add", "advance.txt"]);
+    git(&parent_worktree, &["commit", "-qm", "advance parent"]);
+
+    let advanced = fixture.envoy_json(&["doctor", "312", "--json"], 1);
+    assert_eq!(advanced["doctor"]["gates"]["publish"], "ok");
+    assert_eq!(advanced["doctor"]["gates"]["merge"], "warning");
+    assert!(
+        advanced["doctor"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| { check["id"] == "merge.parent_advanced" && check["status"] == "warn" })
+    );
+
+    let tree = git_stdout(&parent_worktree, &["rev-parse", "HEAD^{tree}"]);
+    let rewritten_tip = git_stdout(
+        &parent_worktree,
+        &["commit-tree", &tree, "-m", "rewritten parent root"],
+    );
+    git(&parent_worktree, &["reset", "--hard", &rewritten_tip]);
+    let rewritten = fixture.envoy_json(&["doctor", "312", "--json"], 2);
+    assert_eq!(rewritten["doctor"]["gates"]["publish"], "blocked");
+    assert!(
+        rewritten["doctor"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| {
+                check["id"] == "publish.parent_generation" && check["status"] == "fail"
+            })
+    );
+}
+
+#[test]
+fn released_parent_blocks_without_substituting_reclaimed_generation() {
+    let fixture = RepositoryFixture::with_remote();
+    let original = fixture.envoy_json(&["claim", "321", "--json"], 0);
+    fixture.envoy_json(&["claim", "322", "--onto", "321", "--json"], 0);
+    fixture.envoy_json(&["release", "321", "--reason", "merged", "--json"], 0);
+    let replacement = fixture.envoy_json(&["claim", "321", "--json"], 0);
+
+    let report = fixture.envoy_json(&["doctor", "--stack", "322", "--json"], 2);
+
+    assert_eq!(report["doctor"]["gates"]["publish"], "blocked");
+    assert_eq!(
+        report["doctor"]["nodes"][0]["claim_id"],
+        original["claim"]["claim_id"]
+    );
+    assert_ne!(
+        report["doctor"]["nodes"][0]["claim_id"],
+        replacement["claim"]["claim_id"]
+    );
+    assert!(
+        report["doctor"]["recommendations"][0]
+            .as_str()
+            .unwrap()
+            .contains("Restack manually")
+    );
+}
+
+#[test]
+fn dogfood_stack_sibling_and_risk_overlap_gates_are_coherent() {
+    let fixture = RepositoryFixture::with_remote();
+    fixture.envoy_json(&["claim", "401", "--json"], 0);
+    let first = fixture.envoy_json(&["claim", "402", "--onto", "401", "--json"], 0);
+    let second = fixture.envoy_json(&["claim", "403", "--onto", "401", "--json"], 0);
+    for claim in [&first, &second] {
+        let worktree = PathBuf::from(claim["claim"]["worktree"].as_str().unwrap());
+        fs::create_dir_all(worktree.join("src")).expect("create source directory");
+        fs::create_dir_all(worktree.join(".github/workflows")).expect("create workflow directory");
+        fs::write(worktree.join("src/shared.rs"), "shared\n").expect("write ordinary overlap");
+        fs::write(worktree.join(".github/workflows/ci.yml"), "name: shared\n")
+            .expect("write risk overlap");
+    }
+
+    let report = fixture.envoy_json(&["doctor", "402", "--json"], 2);
+
+    assert_eq!(report["doctor"]["gates"]["publish"], "ok");
+    assert_eq!(report["doctor"]["gates"]["merge"], "blocked");
+    let overlaps = report["doctor"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|check| check["id"] == "merge.overlap")
+        .collect::<Vec<_>>();
+    assert!(overlaps.iter().any(|check| check["status"] == "warn"));
+    assert!(overlaps.iter().any(|check| {
+        check["status"] == "fail"
+            && check["evidence"]["overlap"]["labels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|label| label == "workflow")
+    }));
+}
+
+#[test]
 fn branch_and_worktree_adoption_preserve_existing_git_state() {
     let fixture = RepositoryFixture::with_remote();
     fixture.git(&["branch", "existing-branch", "main"]);

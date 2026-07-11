@@ -1,0 +1,17 @@
+Doctor report for local/fixture issue #12
+
+Overall: blocked
+Gates: integrity=ok publish=ok merge=blocked
+
+Checks:
+
+Stack nodes (root -> target):
+
+#11 11111111: ok (integrity=ok publish=ok merge=ok)
+  ✓ [publish] Parent generation: root has no parent
+
+#12 22222222: blocked (integrity=ok publish=ok merge=blocked)
+  ✗ [merge] Diff overlap: risk-path overlap blocks merge
+
+Recommendations:
+- resolve overlap before merge

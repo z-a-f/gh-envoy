@@ -2,8 +2,8 @@ use std::num::NonZeroU64;
 
 use chrono::{TimeZone, Utc};
 use gh_envoy::doctor::{
-    CheckGate, CheckStatus, DoctorCheck, DoctorReport, DoctorSubject, GateRollup, doctor_document,
-    redact_doctor_paths, render_doctor_human, rollup_gate,
+    CheckGate, CheckStatus, DoctorCheck, DoctorNodeReport, DoctorReport, DoctorSubject, GateRollup,
+    doctor_document, redact_doctor_paths, render_doctor_human, rollup_gate,
 };
 use gh_envoy::exit::EnvoyExitCode;
 use tempfile::TempDir;
@@ -185,6 +185,97 @@ fn human_renderer_distinguishes_warning_symbol_and_stack_subject() {
     assert!(human.ends_with("Recommendations:\n- None\n"));
 }
 
+#[test]
+fn ordered_stack_nodes_roll_up_into_the_aggregate_report() {
+    let root_id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+    let child_id = uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+    let root = DoctorNodeReport::new(
+        issue(11),
+        root_id,
+        vec![DoctorCheck::new(
+            "publish.parent_generation",
+            CheckGate::Publish,
+            "Parent generation",
+            CheckStatus::Pass,
+            "root has no parent",
+        )],
+        Vec::new(),
+    );
+    let child = DoctorNodeReport::new(
+        issue(12),
+        child_id,
+        vec![DoctorCheck::new(
+            "merge.overlap",
+            CheckGate::Merge,
+            "Diff overlap",
+            CheckStatus::Fail,
+            "risk-path overlap blocks merge",
+        )],
+        vec!["resolve overlap before merge".to_owned()],
+    );
+    let report = DoctorReport::new(
+        DoctorSubject {
+            repo: "local/fixture".to_owned(),
+            issue: Some(issue(12)),
+            stack: true,
+        },
+        Vec::new(),
+        Vec::new(),
+        timestamp(),
+    )
+    .with_nodes(vec![root, child]);
+
+    assert_eq!(report.status, GateRollup::Blocked);
+    assert_eq!(report.gates.publish, GateRollup::Ok);
+    assert_eq!(report.gates.merge, GateRollup::Blocked);
+    assert_eq!(report.nodes[0].claim_id, root_id);
+    assert_eq!(report.nodes[1].claim_id, child_id);
+    let value = serde_json::to_value(doctor_document(&report)).expect("serialize stack doctor");
+    assert_eq!(value["doctor"]["nodes"][0]["issue"], 11);
+    assert_eq!(value["doctor"]["nodes"][1]["issue"], 12);
+    assert_text_eq(
+        &render_doctor_human(&report),
+        include_str!("golden/doctor-stack-human.txt"),
+    );
+    assert_text_eq(
+        &serde_json::to_string(&doctor_document(&report)).expect("serialize stack doctor"),
+        include_str!("golden/doctor-stack-json.json").trim_end(),
+    );
+}
+
+#[test]
+fn stack_node_paths_are_redacted_recursively() {
+    let path = std::env::temp_dir().join("stack-node-worktree");
+    let node = DoctorNodeReport::new(
+        issue(15),
+        uuid::Uuid::new_v4(),
+        vec![
+            DoctorCheck::new(
+                "integrity.worktree",
+                CheckGate::Integrity,
+                "Worktree",
+                CheckStatus::Pass,
+                "worktree is valid",
+            )
+            .with_evidence(serde_json::json!({"worktree": path})),
+        ],
+        vec![format!("Inspect {}", path.display())],
+    );
+    let report =
+        DoctorReport::new(subject(), Vec::new(), Vec::new(), timestamp()).with_nodes(vec![node]);
+
+    let redacted = redact_doctor_paths(&report);
+
+    assert_eq!(
+        redacted.nodes[0].checks[0].evidence.as_ref().unwrap()["worktree"],
+        "…/stack-node-worktree"
+    );
+    assert_eq!(
+        redacted.nodes[0].recommendations,
+        ["Inspect …/stack-node-worktree"]
+    );
+}
+
 fn check(status: CheckStatus) -> DoctorCheck {
     DoctorCheck::new(
         "integrity.example",
@@ -205,6 +296,10 @@ fn subject() -> DoctorSubject {
         issue: Some(NonZeroU64::new(12).expect("positive issue")),
         stack: false,
     }
+}
+
+fn issue(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).expect("positive issue")
 }
 
 fn timestamp() -> chrono::DateTime<Utc> {
