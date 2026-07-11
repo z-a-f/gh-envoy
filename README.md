@@ -112,9 +112,18 @@ Fresh, unstacked claims provision an isolated branch and worktree from an exact 
 gh envoy claim 123
 gh envoy claim 124 --no-cd
 gh envoy claim 125 --cd
+gh envoy claim 123 --resume
 ```
 
 Interactive claims enter a nested worktree shell by default. `--no-cd` is intended for callers that will start work separately; `--cd` makes the shell handoff explicit. The shell is selected from `SHELL`, then `COMSPEC`, with a platform fallback.
+
+If an issue already has an active local claim, use `--resume` to enter that exact generation instead of receiving an already-claimed error:
+
+```sh
+gh envoy claim 123 --resume
+```
+
+Resume is read-only: it does not create a generation, refresh a base, or change persisted scope. It verifies that the active branch is still registered at the claimed worktree, then opens the nested shell there. Creation options, `--no-cd`, and `--json` cannot be combined with `--resume`.
 
 Existing local branches and registered worktrees can be adopted without resetting or moving them:
 

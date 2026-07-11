@@ -15,7 +15,9 @@ use crate::doctor::{
 };
 use crate::exit::EnvoyExitCode;
 use crate::git::RepositoryContext;
-use crate::lifecycle::{ClaimOptions, LifecycleError, claim_issue_with_options, release_claim};
+use crate::lifecycle::{
+    ClaimOptions, LifecycleError, claim_issue_with_options, release_claim, resumable_claim,
+};
 use crate::list::{
     get_claim_list, list_document, render_claim_list_human, render_claim_list_human_colored,
 };
@@ -99,6 +101,16 @@ pub struct ClaimArgs {
         help = "Do not enter the claimed worktree after claiming"
     )]
     pub no_cd: bool,
+
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "branch", "worktree", "onto", "after", "scope", "disallow", "note", "cd",
+            "no_cd", "json"
+        ],
+        help = "Resume the active local claim and enter its worktree shell"
+    )]
+    pub resume: bool,
 }
 
 #[derive(Debug, Args)]
@@ -345,6 +357,9 @@ fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
             );
         }
     };
+    if arguments.resume {
+        return run_resume_claim(&cwd, arguments.issue);
+    }
     let options = ClaimOptions {
         branch: arguments.branch,
         worktree: arguments.worktree,
@@ -406,6 +421,32 @@ fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
             exit_code
         }
         Err(error) => render_lifecycle_error("claim", json, &error),
+    }
+}
+
+fn run_resume_claim(cwd: &Path, issue: NonZeroU64) -> EnvoyExitCode {
+    match resumable_claim(&SystemRunner, cwd, issue) {
+        Ok(claim) => {
+            let _ = writeln!(
+                io::stdout().lock(),
+                "Resuming issue #{} generation {}\nBranch: {}\nWorktree: {}",
+                claim.issue,
+                &claim.claim_id.to_string()[..8],
+                claim.branch,
+                claim.worktree.display()
+            );
+            match enter_worktree_shell(&claim.worktree) {
+                Ok(()) => EnvoyExitCode::Success,
+                Err(error) => {
+                    let _ = writeln!(
+                        io::stderr().lock(),
+                        "warning: active claim found, but the worktree shell could not start: {error}"
+                    );
+                    EnvoyExitCode::Warning
+                }
+            }
+        }
+        Err(error) => render_lifecycle_error("claim", false, &error),
     }
 }
 
@@ -593,6 +634,11 @@ mod tests {
         assert!(!no_cd.cd && no_cd.no_cd);
         assert!(Cli::try_parse_from(["gh-envoy", "claim", "7", "--cd", "--no-cd"]).is_err());
         assert!(Cli::try_parse_from(["gh-envoy", "claim", "7", "--cd", "--json"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gh-envoy", "claim", "7", "--resume", "--scope", "src/**"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["gh-envoy", "claim", "7", "--resume", "--no-cd"]).is_err());
     }
 
     #[test]

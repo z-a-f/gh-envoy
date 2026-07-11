@@ -48,6 +48,14 @@ The command prints the claim, branch, worktree, captured base, and any warning a
 
 The `gh-envoy` extension cannot persistently change its parent shell's directory. The nested shell provides the intended claim-and-enter workflow; exit it to return to the original directory. Use `gh envoy claim 123 --no-cd` to skip the shell or `--cd` to request it explicitly. Non-interactive and JSON claims do not enter a shell by default, and `--cd` cannot be combined with `--json`.
 
+When the issue is already claimed locally, resume its exact active generation:
+
+```sh
+gh envoy claim 123 --resume
+```
+
+Resume performs no store or Git mutation. It verifies the recorded branch/worktree association and enters the nested worktree shell. If the claim is absent or stale, resume is blocked and leaves history unchanged; run status or doctor rather than silently creating a replacement generation.
+
 During development:
 
 ```sh

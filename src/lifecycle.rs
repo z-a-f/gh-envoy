@@ -42,6 +42,48 @@ pub fn claim_issue<R: CommandRunner>(
     claim_issue_with_options(runner, cwd, issue, ClaimOptions::default())
 }
 
+pub fn resumable_claim<R: CommandRunner>(
+    runner: &R,
+    cwd: &Path,
+    issue: NonZeroU64,
+) -> Result<Claim, LifecycleError> {
+    let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
+    let config = Config::load(&common_dir)?;
+    let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
+    let store = Store::new(repository.store_root());
+    let active = store.active_claims()?;
+    let claim = unique_active_claim(&active, issue)?.ok_or_else(|| {
+        LifecycleError::Refused(format!("issue {issue} has no active claim to resume"))
+    })?;
+    let expected = canonical_existing(claim.worktree.clone()).map_err(|error| {
+        LifecycleError::Refused(format!(
+            "issue {issue} generation {} is not resumable: {error}",
+            short_id(claim.claim_id)
+        ))
+    })?;
+    let registered = canonical_worktree(
+        &GitCli::new(runner),
+        &repository.main_worktree,
+        &claim.branch,
+    )
+    .map_err(|error| {
+        LifecycleError::Refused(format!(
+            "issue {issue} generation {} is not resumable: {error}",
+            short_id(claim.claim_id)
+        ))
+    })?;
+    if registered != expected {
+        return Err(LifecycleError::Refused(format!(
+            "issue {issue} generation {} is not resumable: branch {:?} is registered at {:?}, not {:?}",
+            short_id(claim.claim_id),
+            claim.branch,
+            registered,
+            expected
+        )));
+    }
+    Ok(claim.clone())
+}
+
 pub fn claim_issue_with_options<R: CommandRunner>(
     runner: &R,
     cwd: &Path,

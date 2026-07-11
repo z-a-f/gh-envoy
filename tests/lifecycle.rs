@@ -180,6 +180,122 @@ fn claim_cd_shell_failure_warns_without_losing_the_claim() {
             .count(),
         1
     );
+
+    let resumed = envoy()
+        .current_dir(fixture.repository())
+        .env("SHELL", fixture._root.path().join("still-missing-shell"))
+        .args(["claim", "13", "--resume"])
+        .output()
+        .expect("resume with missing shell");
+    assert_eq!(resumed.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&resumed.stderr)
+            .contains("active claim found, but the worktree shell could not start")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn claim_resume_enters_the_existing_worktree_without_creating_a_generation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = RepositoryFixture::with_remote();
+    let original = run_envoy_json(fixture.repository(), &["claim", "14", "--json"]);
+    let shell = fixture._root.path().join("resume-shell");
+    let capture = fixture._root.path().join("resume-pwd");
+    fs::write(&shell, "#!/bin/sh\npwd > \"$ENVOY_TEST_CAPTURE\"\n").expect("write shell");
+    let mut permissions = fs::metadata(&shell).expect("shell metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shell, permissions).expect("make shell executable");
+
+    let resumed = envoy()
+        .current_dir(fixture.repository())
+        .env("SHELL", &shell)
+        .env("ENVOY_TEST_CAPTURE", &capture)
+        .args(["claim", "14", "--resume"])
+        .output()
+        .expect("resume claim");
+
+    assert_eq!(resumed.status.code(), Some(0));
+    let stdout = String::from_utf8(resumed.stdout).expect("resume output");
+    assert!(stdout.contains("Resuming issue #14"));
+    assert!(stdout.contains("Entering a shell in"));
+    assert_same_existing_path(
+        fs::read_to_string(capture).expect("captured cwd").trim(),
+        original["claim"]["worktree"].as_str().unwrap(),
+    );
+    let history = run_envoy_json(fixture.repository(), &["list", "--json"]);
+    assert_eq!(history["claims"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        history["claims"][0]["claim"]["claim_id"],
+        original["claim"]["claim_id"]
+    );
+}
+
+#[test]
+fn claim_resume_refuses_absent_or_stale_active_claims_without_mutation() {
+    let empty = RepositoryFixture::with_remote();
+    let absent = envoy()
+        .current_dir(empty.repository())
+        .args(["claim", "15", "--resume"])
+        .output()
+        .expect("resume absent claim");
+    assert_eq!(absent.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&absent.stderr).contains("no active claim to resume"));
+    assert!(!empty.store_root().exists());
+
+    let stale = RepositoryFixture::with_remote();
+    let claim = run_envoy_json(stale.repository(), &["claim", "16", "--json"]);
+    let worktree = claim["claim"]["worktree"].as_str().unwrap();
+    let branch = claim["claim"]["branch"].as_str().unwrap();
+    stale.git(&["worktree", "remove", "--", worktree]);
+    stale.git(&["branch", "-D", "--", branch]);
+
+    let refused = envoy()
+        .current_dir(stale.repository())
+        .args(["claim", "16", "--resume"])
+        .output()
+        .expect("resume stale claim");
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not resumable"));
+    assert_eq!(
+        run_envoy_json(stale.repository(), &["list", "--json"])["claims"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let mismatch = RepositoryFixture::with_remote();
+    let claim = run_envoy_json(mismatch.repository(), &["claim", "17", "--json"]);
+    let claim_id = claim["claim"]["claim_id"].as_str().unwrap();
+    let claim_path = mismatch
+        .store_root()
+        .join("claims/17")
+        .join(format!("{claim_id}.json"));
+    let mut persisted: Value =
+        serde_json::from_slice(&fs::read(&claim_path).expect("read claim")).expect("claim JSON");
+    persisted["worktree"] = Value::String(
+        mismatch
+            .repository()
+            .canonicalize()
+            .expect("canonical repository")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    fs::write(
+        &claim_path,
+        serde_json::to_vec_pretty(&persisted).expect("serialize claim"),
+    )
+    .expect("replace claim worktree");
+
+    let refused = envoy()
+        .current_dir(mismatch.repository())
+        .args(["claim", "17", "--resume"])
+        .output()
+        .expect("resume mismatched claim");
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("is registered at"));
 }
 
 #[test]
