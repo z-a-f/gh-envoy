@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$root"
+
+bin="${CARGO_TARGET_DIR:-$root/target}/release/gh-envoy"
+if [[ ! -f "$bin" ]]; then
+  bin="${bin}.exe"
+fi
+
+cargo build --release --locked --quiet >&2
+
+exec "$bin" "$@"

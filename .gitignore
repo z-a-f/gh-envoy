@@ -4,6 +4,7 @@ plan.md
 spec.md
 
 # Rust
+dist/
 target/
 **/*.rs.bk
 *.pdb

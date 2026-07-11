@@ -8,7 +8,16 @@ The project builds a single `gh-envoy` binary. Git remains the source of truth: 
 
 Envoy is useful when several people or coding agents need to work on different GitHub issues in the same repository without silently sharing branches or worktrees. An issue claim records declared exclusive ownership of one branch and one worktree. It is a coordination contract, not a filesystem or process lock: Envoy detects unsafe states and reports them, while people and agents still perform the development work.
 
-Build the binary, put it on `PATH`, and confirm that GitHub CLI can discover it as an extension:
+Build and install the extension from a local checkout, then confirm GitHub CLI can run it:
+
+```sh
+gh extension install .
+gh envoy --help
+```
+
+The root `gh-envoy` script builds the release binary on demand with `cargo build --release --locked`, so reinstalling after code changes is not required.
+
+Alternatively, put a built binary on `PATH` directly:
 
 ```sh
 cargo build --release --locked
@@ -16,7 +25,7 @@ export PATH="$PWD/target/release:$PATH"
 gh envoy --help
 ```
 
-You can also invoke `target/release/gh-envoy` directly. On Windows, add `target\release` to `PATH` using your normal shell or system settings.
+You can also invoke `target/release/gh-envoy` directly. On Windows, Git for Windows provides the `sh.exe` interpreter needed to run the root script; you can also add `target\release` to `PATH` using your normal shell or system settings.
 
 The basic dogfooding loop is:
 
@@ -49,7 +58,7 @@ See the [dogfooding guide](docs/dogfooding.md) for complete workflows, stack and
 Install the stable Rust toolchain, then run:
 
 ```sh
-cargo build --locked
+gh extension install .
 cargo check --locked
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -60,7 +69,12 @@ Tests use temporary repositories and fake GitHub command runners. They do not re
 
 ## CLI
 
-Build the extension entrypoint and inspect its commands:
+Install locally as a gh extension, or build the entrypoint directly:
+
+```sh
+gh extension install .
+gh envoy --help
+```
 
 ```sh
 cargo build --release --locked
