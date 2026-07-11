@@ -1,0 +1,2 @@
+# Golden text fixtures must have checkout-stable contents on every CI runner.
+tests/golden/** text eol=lf

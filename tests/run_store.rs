@@ -8,6 +8,10 @@ use gh_envoy::store::{NewRun, Store, StoreError};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+mod support;
+
+use support::assert_text_eq;
+
 #[test]
 fn run_creation_binds_an_exact_persisted_claim_and_keeps_artifacts_private() {
     let fixture = RunFixture::new();
@@ -474,7 +478,7 @@ fn run_record_json_golden_contains_paths_but_never_private_contents_or_arguments
     }]);
     let rendered = serde_json::to_string_pretty(&value).unwrap() + "\n";
 
-    assert_eq!(rendered, include_str!("golden/run-records-json.json"));
+    assert_text_eq(&rendered, include_str!("golden/run-records-json.json"));
     for secret in ["prompt", "arguments", "log_contents", "private token"] {
         assert!(!value[0].as_object().unwrap().contains_key(secret));
     }
