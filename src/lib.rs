@@ -3,6 +3,7 @@ pub mod command;
 pub mod config;
 pub mod conflict;
 pub mod doctor;
+pub mod execution;
 pub mod exit;
 pub mod git;
 pub mod github;

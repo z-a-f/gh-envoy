@@ -8,6 +8,7 @@ repository = "https://github.com/z-a-f/gh-envoy"
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.5"
 fs4 = "1"
 globset = "0.4"
 reqwest = { version = "0.13", features = ["json"] }
@@ -17,6 +18,15 @@ serde_yaml = "0.9"
 tempfile = "3"
 thiserror = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[target.'cfg(unix)'.dependencies]
+process-wrap = { version = "9.1", default-features = false, features = ["std", "process-session"] }
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "9.1", default-features = false, features = ["std", "job-object"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.31", features = ["process"] }
 
 [dev-dependencies]
 assert_cmd = "2"
