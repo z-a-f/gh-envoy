@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Rust (${{ matrix.os }})
@@ -26,20 +30,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            quality: true
+            cache_scope: quality
+            components: clippy, rustfmt
+          - os: macos-latest
+            quality: false
+            cache_scope: platform
+            components: ""
+          - os: windows-latest
+            quality: false
+            cache_scope: platform
+            components: ""
 
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: ${{ matrix.components }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
+          shared-key: ci-${{ matrix.cache_scope }}
           cache-on-failure: true
-      - run: cargo fmt
+      - if: matrix.quality
+        run: cargo fmt
             --check
-      - run: cargo clippy
+      - if: matrix.quality
+        run: cargo clippy
             --all-targets
             --all-features
             -- -D warnings
@@ -47,9 +65,8 @@ jobs:
             --profile ci-dev
             --all-targets
             --locked
-      - run: cargo build
-            --locked
       - name: Smoke-test the extension entrypoint
+        if: matrix.quality
         run: cargo run
             --locked
             -- --help
