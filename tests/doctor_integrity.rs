@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use gh_envoy::command::SystemRunner;
-use gh_envoy::doctor::{CheckStatus, GateRollup, doctor_repository};
+use gh_envoy::doctor::{CheckStatus, GateRollup, doctor_repository, redact_doctor_paths};
 use gh_envoy::model::{
-    Claim, DeclaredScope, OperationKind, OperationPhase, OperationRecord, SCHEMA_VERSION,
+    Claim, DeclaredScope, OperationKind, OperationPhase, OperationRecord, RunMode, SCHEMA_VERSION,
     WaitForRef,
 };
-use gh_envoy::store::Store;
+use gh_envoy::store::{NewRun, Store};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -38,6 +38,7 @@ fn valid_claim_passes_every_local_integrity_check() {
         "integrity.diff",
         "integrity.ownership",
         "integrity.operation_journal",
+        "integrity.run_store",
     ] {
         assert!(
             report
@@ -48,6 +49,168 @@ fn valid_claim_passes_every_local_integrity_check() {
             report.checks
         );
     }
+}
+
+#[test]
+fn incomplete_run_directory_is_a_read_only_integrity_failure() {
+    let fixture = RepositoryFixture::new();
+    let run_id = Uuid::parse_str("aaaaaaaa-1111-4111-8111-111111111111").unwrap();
+    let run_directory = fixture.store().run_directory(run_id);
+    fs::create_dir_all(&run_directory).expect("create incomplete run directory");
+    fs::write(run_directory.join("prompt.md"), "private prompt").expect("write artifact");
+    let before = fs::read(run_directory.join("prompt.md")).unwrap();
+
+    let report = doctor_repository(&SystemRunner, fixture.repository(), None).expect("run doctor");
+
+    assert_eq!(report.status, GateRollup::Blocked);
+    assert!(report.checks.iter().any(|check| {
+        check.id == "integrity.run_store"
+            && check.status == CheckStatus::Fail
+            && check.required
+            && check.message.contains(&run_id.to_string())
+            && !check.message.contains("private prompt")
+    }));
+    assert_eq!(fs::read(run_directory.join("prompt.md")).unwrap(), before);
+    assert!(!run_directory.join("run.json").exists());
+    let redacted = serde_json::to_string(&redact_doctor_paths(&report)).unwrap();
+    assert!(!redacted.contains(&fixture.root.path().to_string_lossy().into_owned()));
+    assert!(redacted.contains("…/run.json"));
+}
+
+#[test]
+fn interrupted_run_creation_recommends_only_run_artifact_cleanup() {
+    let fixture = RepositoryFixture::new();
+    let run_id = Uuid::parse_str("bbbbbbbb-1111-4111-8111-111111111111").unwrap();
+    let run_directory = fixture.store().run_directory(run_id);
+    fs::create_dir_all(&run_directory).expect("create incomplete run directory");
+    let operation = OperationRecord {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        operation_id: run_id,
+        kind: OperationKind::Run,
+        claim_id: Uuid::new_v4(),
+        issue: issue(24),
+        branch: "issue/24".to_owned(),
+        worktree: fixture.repository().to_path_buf(),
+        phase: OperationPhase::RunArtifactsCreated,
+        started_at: Utc::now(),
+    };
+    fixture
+        .store()
+        .lock()
+        .unwrap()
+        .write_operation(&operation)
+        .unwrap();
+
+    let report = doctor_repository(&SystemRunner, fixture.repository(), Some(issue(24)))
+        .expect("run doctor");
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.id == "integrity.operation_journal")
+        .expect("journal check");
+    let recovery = &check.evidence.as_ref().unwrap()["recovery"];
+
+    assert_eq!(recovery["commands"], serde_json::json!([]));
+    assert_eq!(
+        PathBuf::from(recovery["remove_run_directory"].as_str().unwrap()),
+        run_directory
+    );
+    assert!(report.recommendations.iter().any(|recommendation| {
+        recommendation.contains("incomplete run directory")
+            && recommendation.contains(&run_id.to_string())
+    }));
+    assert!(run_directory.exists(), "doctor must remain read-only");
+}
+
+#[test]
+fn run_journal_recovery_distinguishes_committed_and_reserved_phases() {
+    let fixture = RepositoryFixture::new();
+    let base = fixture.git_stdout(fixture.repository(), &["rev-parse", "HEAD"]);
+    let worktree = fixture.add_worktree("run-recovery", &base);
+    let claim = fixture.claim(25, "run-recovery", &worktree, &base);
+    fixture.persist(&claim);
+    let run_id = Uuid::new_v4();
+    fixture
+        .store()
+        .lock()
+        .unwrap()
+        .create_run(
+            &claim,
+            NewRun {
+                run_id,
+                agent: "codex",
+                mode: RunMode::Background,
+                prompt: b"private",
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    let committed = OperationRecord {
+        schema_version: SCHEMA_VERSION.to_owned(),
+        operation_id: run_id,
+        kind: OperationKind::Run,
+        claim_id: claim.claim_id,
+        issue: claim.issue,
+        branch: claim.branch.clone(),
+        worktree: claim.worktree.clone(),
+        phase: OperationPhase::RunCommitted,
+        started_at: Utc::now(),
+    };
+    fixture
+        .store()
+        .lock()
+        .unwrap()
+        .write_operation(&committed)
+        .unwrap();
+
+    let committed_report =
+        doctor_repository(&SystemRunner, fixture.repository(), Some(claim.issue))
+            .expect("run doctor");
+    assert!(
+        committed_report
+            .recommendations
+            .iter()
+            .any(|recommendation| {
+                recommendation.contains("after confirming run")
+                    && recommendation.contains("is intact")
+            })
+    );
+    assert!(
+        !committed_report
+            .recommendations
+            .iter()
+            .any(|recommendation| { recommendation.contains("incomplete run directory") })
+    );
+
+    fixture
+        .store()
+        .lock()
+        .unwrap()
+        .remove_operation(run_id)
+        .unwrap();
+    let reserved_id = Uuid::new_v4();
+    let reserved = OperationRecord {
+        operation_id: reserved_id,
+        phase: OperationPhase::Reserved,
+        ..committed
+    };
+    fixture
+        .store()
+        .lock()
+        .unwrap()
+        .write_operation(&reserved)
+        .unwrap();
+    let reserved_report = doctor_repository(&SystemRunner, fixture.repository(), Some(claim.issue))
+        .expect("run doctor");
+    assert!(
+        reserved_report
+            .recommendations
+            .iter()
+            .any(|recommendation| {
+                recommendation.contains("created no artifacts")
+                    && recommendation.contains(&reserved_id.to_string())
+            })
+    );
 }
 
 #[test]

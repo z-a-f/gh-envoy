@@ -115,7 +115,7 @@ pub fn get_status<R: CommandRunner>(runner: &R, cwd: &Path) -> Result<StatusRepo
     let config = Config::load(&common_dir)?;
     let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
     let observation = observe_repository(runner, cwd)?;
-    let replacements = observation
+    let mut replacements = observation
         .claims
         .iter()
         .map(|observed| {
@@ -125,6 +125,14 @@ pub fn get_status<R: CommandRunner>(runner: &R, cwd: &Path) -> Result<StatusRepo
             )
         })
         .collect::<Vec<_>>();
+    replacements.extend(observation.problems.iter().filter_map(|problem| {
+        problem.path.as_ref().map(|path| {
+            (
+                path.to_string_lossy().into_owned(),
+                shortened_worktree(path),
+            )
+        })
+    }));
     let claims = observation
         .claims
         .into_iter()
@@ -221,6 +229,9 @@ pub fn get_status<R: CommandRunner>(runner: &R, cwd: &Path) -> Result<StatusRepo
         .map(|mut problem| {
             if config.redact_paths_in_json {
                 problem.message = redact_message(problem.message, &replacements);
+                if let Some(path) = &problem.path {
+                    problem.path = Some(PathBuf::from(shortened_worktree(path)));
+                }
             }
             problem
         })
@@ -488,6 +499,7 @@ fn problem_code(value: LocalProblemCode) -> &'static str {
         LocalProblemCode::MissingWorktree => "missing_worktree",
         LocalProblemCode::WorktreeMismatch => "worktree_mismatch",
         LocalProblemCode::AbandonedOperation => "abandoned_operation",
+        LocalProblemCode::InvalidRunStore => "invalid_run_store",
     }
 }
 

@@ -17,7 +17,7 @@ use crate::github::{
     GithubIssueError, GithubIssueObservation, GithubIssueState, GithubPullRequestObservation,
     GithubPullRequestState, observe_issue, observe_pull_request,
 };
-use crate::model::{Claim, SCHEMA_VERSION};
+use crate::model::{Claim, OperationKind, SCHEMA_VERSION};
 use crate::observation::{
     LocalProblem, LocalProblemCode, ObservationError, observe_claims, observe_repository,
 };
@@ -819,6 +819,37 @@ pub fn doctor_repository<R: CommandRunner>(
         }
     }
 
+    let run_problems = observation
+        .problems
+        .iter()
+        .filter(|problem| problem.code == LocalProblemCode::InvalidRunStore)
+        .collect::<Vec<_>>();
+    checks.push(
+        DoctorCheck::new(
+            "integrity.run_store",
+            CheckGate::Integrity,
+            "Run store",
+            if run_problems.is_empty() {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail
+            },
+            if run_problems.is_empty() {
+                "persisted run records and artifact locations are valid".to_owned()
+            } else {
+                run_problems
+                    .iter()
+                    .map(|problem| problem.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            },
+        )
+        .required()
+        .with_evidence(json!({
+            "problems": run_problems
+        })),
+    );
+
     Ok(DoctorReport::new(
         subject,
         checks,
@@ -1498,6 +1529,8 @@ struct RecoveryCommand {
 #[derive(Serialize)]
 struct RecoveryPlan {
     commands: Vec<RecoveryCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remove_run_directory: Option<PathBuf>,
     remove_journal: PathBuf,
 }
 
@@ -1509,6 +1542,47 @@ fn recovery_plan<R: CommandRunner>(
     claims: &[crate::observation::ClaimObservation],
 ) -> (RecoveryPlan, Vec<String>) {
     let journal = store.operation_path(operation.operation_id);
+    if operation.kind == OperationKind::Run {
+        let run_directory = store.run_directory(operation.operation_id);
+        let committed = store
+            .read_run(operation.operation_id)
+            .is_ok_and(|run| run.is_some());
+        let mut recommendations = Vec::new();
+        let remove_run_directory = if committed {
+            recommendations.push(format!(
+                "Remove operation journal {} after confirming run {} is intact",
+                journal.display(),
+                operation.operation_id
+            ));
+            None
+        } else if run_directory.exists() {
+            recommendations.push(format!(
+                "Remove incomplete run directory {} for run {} after inspecting its private artifacts",
+                run_directory.display(),
+                operation.operation_id
+            ));
+            recommendations.push(format!(
+                "Remove operation journal {} only after run artifact cleanup succeeds",
+                journal.display()
+            ));
+            Some(run_directory)
+        } else {
+            recommendations.push(format!(
+                "Remove operation journal {} after confirming run {} created no artifacts",
+                journal.display(),
+                operation.operation_id
+            ));
+            None
+        };
+        return (
+            RecoveryPlan {
+                commands: Vec::new(),
+                remove_run_directory,
+                remove_journal: journal,
+            },
+            recommendations,
+        );
+    }
     if claims
         .iter()
         .any(|observed| observed.claim.claim_id == operation.claim_id)
@@ -1516,6 +1590,7 @@ fn recovery_plan<R: CommandRunner>(
         return (
             RecoveryPlan {
                 commands: Vec::new(),
+                remove_run_directory: None,
                 remove_journal: journal.clone(),
             },
             vec![format!(
@@ -1574,6 +1649,7 @@ fn recovery_plan<R: CommandRunner>(
     (
         RecoveryPlan {
             commands,
+            remove_run_directory: None,
             remove_journal: journal,
         },
         recommendations,
