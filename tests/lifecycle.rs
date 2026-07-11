@@ -94,7 +94,9 @@ fn human_output_reports_claim_warning_and_release_result() {
         .output()
         .expect("run human claim");
     assert_eq!(claim.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&claim.stdout).contains("Claimed issue #11"));
+    let claim_stdout = String::from_utf8_lossy(&claim.stdout);
+    assert!(claim_stdout.contains("Claimed issue #11"));
+    assert!(claim_stdout.contains("Next: change directory to the claimed worktree above"));
     assert!(String::from_utf8_lossy(&claim.stderr).contains("warning: base"));
 
     let release = envoy()

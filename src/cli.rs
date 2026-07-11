@@ -38,11 +38,17 @@ pub enum EnvoyCommand {
     /// Claim an issue for work in an isolated worktree.
     Claim(ClaimArgs),
     /// Show active claims and coordination findings.
-    Status,
+    Status(StatusArgs),
     /// Check local integrity, publish readiness, and merge coordination.
     Doctor(DoctorArgs),
     /// Release an active claim.
     Release(ReleaseArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    #[arg(long, help = "Exit with code 1 when coordination warnings are present")]
+    pub strict: bool,
 }
 
 #[derive(Debug, Args)]
@@ -162,7 +168,7 @@ pub fn main_entry() -> EnvoyExitCode {
 fn run(cli: Cli) -> EnvoyExitCode {
     match cli.command {
         EnvoyCommand::Claim(arguments) => run_claim(arguments, cli.json),
-        EnvoyCommand::Status => run_status(cli.json),
+        EnvoyCommand::Status(arguments) => run_status(arguments, cli.json),
         EnvoyCommand::Doctor(arguments) => run_doctor(arguments, cli.json),
         EnvoyCommand::Release(arguments) => run_release(arguments, cli.json),
     }
@@ -218,7 +224,7 @@ fn doctor_json_redacts_paths(cwd: &std::path::Path) -> bool {
     Config::load(&common_dir).map_or(true, |config| config.redact_paths_in_json)
 }
 
-fn run_status(json: bool) -> EnvoyExitCode {
+fn run_status(arguments: StatusArgs, json: bool) -> EnvoyExitCode {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -238,7 +244,7 @@ fn run_status(json: bool) -> EnvoyExitCode {
             } else {
                 let _ = write!(io::stdout().lock(), "{}", render_status_human(&report));
             }
-            if report.has_warnings() {
+            if arguments.strict && report.has_warnings() {
                 EnvoyExitCode::Warning
             } else {
                 EnvoyExitCode::Success
@@ -297,7 +303,7 @@ fn run_claim(arguments: ClaimArgs, json: bool) -> EnvoyExitCode {
                 }
                 let _ = writeln!(
                     io::stdout().lock(),
-                    "Claimed issue #{} as {}\nBranch: {}\nWorktree: {}\nBase: {}/{} at {}",
+                    "Claimed issue #{} as {}\nBranch: {}\nWorktree: {}\nBase: {}/{} at {}\nNext: change directory to the claimed worktree above before starting work.",
                     outcome.claim.issue,
                     &outcome.claim.claim_id.to_string()[..8],
                     outcome.claim.branch,

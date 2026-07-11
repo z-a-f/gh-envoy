@@ -1,4 +1,5 @@
 ISSUE | GEN | TITLE | BRANCH | WORKTREE | BASE | DIFF | OVERLAPS | PR | GITHUB | LOCAL
+--- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---
 #12 | 321ba92e | Build fixture | envoy/issue-12 | …/fixture-issue-12 | origin/main@01234567 | 2/1u | sibling:1,unrelated:1 | - | unverified | scope:1
 #13 | 7a4d91bf | - | envoy/issue-13 | …/fixture-issue-13 | origin/main@01234567 | ? | - | - | unverified | missing_branch
 

@@ -85,7 +85,7 @@ fn released_claims_are_hidden_and_missing_state_warns_with_an_empty_diff() {
     broken_fixture.persist(&missing);
 
     let warning = broken_fixture.status(broken_fixture.repository(), true);
-    assert_eq!(warning.status.code(), Some(1));
+    assert_eq!(warning.status.code(), Some(0));
     let warning: Value = serde_json::from_slice(&warning.stdout).expect("status JSON");
     assert_eq!(warning["status"], "warning");
     assert_eq!(
@@ -112,6 +112,15 @@ fn released_claims_are_hidden_and_missing_state_warns_with_an_empty_diff() {
             .to_string()
             .contains(broken_fixture.root.path().to_str().unwrap())
     );
+
+    let strict = envoy()
+        .current_dir(broken_fixture.repository())
+        .args(["status", "--strict", "--json"])
+        .output()
+        .expect("run strict status");
+    assert_eq!(strict.status.code(), Some(1));
+    let strict: Value = serde_json::from_slice(&strict.stdout).expect("strict status JSON");
+    assert_eq!(strict["status"], "warning");
 }
 
 #[test]

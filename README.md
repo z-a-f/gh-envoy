@@ -37,6 +37,8 @@ The basic dogfooding loop is:
 6. Push, open the pull request, review, and merge with your existing tools. Envoy v0.1 does not write to GitHub.
 7. Mark the local claim complete with `gh envoy release 123 --reason merged`. Release preserves the branch and worktree.
 
+`gh envoy` runs as a child process, so it cannot change the directory of the shell that launched it. Claim output ends with an explicit prompt to change into the exact `Worktree` path it printed. A future shell integration could make claim-and-switch a single shell operation, but a CLI `--switch` flag alone cannot persistently switch its parent shell.
+
 Choose the claim form that matches the work:
 
 | Scenario | Command | When to use it |
@@ -47,7 +49,7 @@ Choose the claim form that matches the work:
 | Stacked change | `gh envoy claim 124 --onto 123` | Record that issue 124 is based on the exact active generation of issue 123. |
 | Consolidation work | `gh envoy claim 130 --after 123 --after 124` | Record that issue 130 should wait for several issue generations. |
 | Bounded ownership | `gh envoy claim 131 --scope 'src/**' --disallow '.github/workflows/**'` | Declare expected and prohibited paths so status and doctor can flag drift. |
-| Automation | `gh envoy status --json` | Consume stable machine-readable output and exit codes. |
+| Automation | `gh envoy status --strict --json` | Consume machine-readable output and fail on coordination warnings. |
 
 Current commands are deliberately local and read-only with respect to GitHub. Issue-title and pull-request observation, guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
 
@@ -144,6 +146,8 @@ gh envoy status --json
 ```
 
 Status derives diffs, overlap relationships, scope findings, and local integrity hints without changing repository or Envoy state. GitHub and PR fields remain explicitly unverified until read-only GitHub observation lands.
+
+Status is informational and exits `0` after rendering, even when the report contains warnings. Use `gh envoy status --strict` when a warning should produce exit code `1`, such as in CI. For a stale claim whose branch and worktree are both gone, run doctor for the safe marker-only release recommendation.
 
 Run local integrity checks for the repository or one active issue:
 

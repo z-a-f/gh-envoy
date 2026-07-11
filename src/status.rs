@@ -160,7 +160,8 @@ pub fn render_status_human(report: &StatusReport) -> String {
     }
 
     let mut output = String::from(
-        "ISSUE | GEN | TITLE | BRANCH | WORKTREE | BASE | DIFF | OVERLAPS | PR | GITHUB | LOCAL\n",
+        "ISSUE | GEN | TITLE | BRANCH | WORKTREE | BASE | DIFF | OVERLAPS | PR | GITHUB | LOCAL\n\
+         --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---\n",
     );
     for status in &report.claims {
         let title = status.claim.title.as_deref().unwrap_or("-");

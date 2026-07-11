@@ -68,7 +68,8 @@ fn twenty_claims_render_as_one_deterministic_row_each() {
 
     let human = render_status_human(&report);
 
-    assert_eq!(human.lines().count(), 21);
+    assert_eq!(human.lines().count(), 22);
+    assert!(human.lines().nth(1).unwrap().starts_with("--- | --- |"));
     assert!(!human.contains("intentionally long"));
     for number in 1..=20 {
         assert!(

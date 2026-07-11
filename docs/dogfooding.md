@@ -46,6 +46,8 @@ gh envoy claim 123
 
 The command prints the claim, branch, worktree, captured base, and any warning about base verification. Change into the reported worktree before modifying files or starting an agent.
 
+Envoy also prints an explicit directory-change prompt after the exact `Worktree` path. The `gh-envoy` extension is a child process and cannot persistently change its parent shell's directory, so a CLI-only `--switch` flag cannot provide that behavior. A future optional shell integration may wrap claim and `cd` as one shell operation.
+
 During development:
 
 ```sh
@@ -54,6 +56,8 @@ gh envoy doctor 123
 ```
 
 `status` is the repository-wide coordination view. `doctor 123` is the focused pre-publish and pre-merge check. Neither command mutates Git or Envoy state.
+
+Status exits `0` when it renders successfully, even if the human or JSON report says `warning`. Use `gh envoy status --strict` when warnings should return exit code `1`.
 
 Publishing and pull-request creation are manual in v0.1. After the work has reached its terminal state, release the claim with the reason that actually occurred:
 
@@ -195,6 +199,14 @@ Common responses are:
 
 Always rerun the same doctor command after recovery.
 
+When both a claim's branch and worktree are missing, doctor treats it as possibly stale and prints the non-destructive cleanup command:
+
+```sh
+gh envoy release <issue> --reason abandoned
+```
+
+Doctor never runs this command itself. Release writes a marker and preserves historical claim data; it does not delete branches or worktrees.
+
 ## Understand gates and exit codes
 
 Doctor reports separate gates because a claim can be locally sound enough to publish while still unsafe to merge:
@@ -208,7 +220,7 @@ Commands use stable process exit codes:
 | Code | Meaning |
 | --- | --- |
 | `0` | Success, or doctor reports ok. |
-| `1` | Warning that needs review but is not an automatic refusal. |
+| `1` | Warning that needs review; emitted by doctor, warning-producing claims, or `status --strict`. |
 | `2` | Blocked or refused. |
 | `3` | Operational error, such as invalid state or command failure. |
 | `4` | Held; reserved for a future ship workflow and not currently emitted by implemented commands. |
@@ -216,7 +228,7 @@ Commands use stable process exit codes:
 For scripts, use `--json` and still check the exit code:
 
 ```sh
-gh envoy --json status
+gh envoy status --strict --json
 gh envoy doctor 123 --json
 ```
 

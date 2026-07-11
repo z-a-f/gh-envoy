@@ -647,6 +647,20 @@ pub fn doctor_repository<R: CommandRunner>(
     for observed in selected {
         let claim = &observed.claim;
         let evidence = || json!({"issue": claim.issue, "claim_id": claim.claim_id});
+        let has_problem = |code| {
+            observation
+                .problems
+                .iter()
+                .any(|problem| problem.claim_id == Some(claim.claim_id) && problem.code == code)
+        };
+        if has_problem(LocalProblemCode::MissingBranch)
+            && has_problem(LocalProblemCode::MissingWorktree)
+        {
+            recommendations.push(format!(
+                "If issue #{} is stale, run: gh envoy release {} --reason abandoned",
+                claim.issue, claim.issue
+            ));
+        }
         checks.push(
             DoctorCheck::new(
                 "integrity.claim_schema",

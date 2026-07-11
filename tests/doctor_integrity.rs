@@ -74,6 +74,9 @@ fn missing_claim_branch_worktree_and_base_block_without_mutation() {
     assert!(report.checks.iter().any(|check| {
         check.id == "integrity.diff" && check.status == CheckStatus::Skip && !check.required
     }));
+    assert!(report.recommendations.iter().any(|recommendation| {
+        recommendation == "If issue #21 is stale, run: gh envoy release 21 --reason abandoned"
+    }));
     assert_eq!(fixture.claim_bytes(&claim), before);
 }
 
