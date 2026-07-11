@@ -3,6 +3,7 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use fs4::FileExt;
 use serde::Serialize;
 use serde_json::Value;
@@ -10,7 +11,31 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::model::{Claim, ModelError, OperationRecord, ReleaseMarker, Validate};
+use crate::model::{
+    Claim, ModelError, OperationKind, OperationPhase, OperationRecord, ReleaseMarker, RunMode,
+    RunRecord, RunTransition, SCHEMA_VERSION, Validate,
+};
+
+#[derive(Clone, Copy, Debug)]
+pub struct NewRun<'a> {
+    pub run_id: Uuid,
+    pub agent: &'a str,
+    pub mode: RunMode,
+    pub prompt: &'a [u8],
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunStoreProblem {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RunInventory {
+    pub runs: Vec<RunRecord>,
+    pub problems: Vec<RunStoreProblem>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Store {
@@ -288,10 +313,97 @@ impl Store {
         Ok(operations)
     }
 
+    pub fn read_run(&self, run_id: Uuid) -> Result<Option<RunRecord>, StoreError> {
+        let directory = self.run_directory(run_id);
+        if !directory.exists() {
+            return Ok(None);
+        }
+        let path = directory.join("run.json");
+        let run = read_run(&path).map_err(|error| StoreError::InvalidRunStore {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        validate_run_location(&path, run_id, &run)?;
+        Ok(Some(run))
+    }
+
+    pub fn inspect_runs(&self) -> Result<RunInventory, StoreError> {
+        let directory = self.root.join("runs");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RunInventory::default());
+            }
+            Err(source) => {
+                return Err(StoreError::Io {
+                    action: "list run records",
+                    path: directory,
+                    source,
+                });
+            }
+        };
+        let mut inventory = RunInventory::default();
+        for entry in entries {
+            let entry = entry.map_err(|source| StoreError::Io {
+                action: "read run directory entry",
+                path: directory.clone(),
+                source,
+            })?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Some(run_id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| Uuid::parse_str(name).ok())
+            else {
+                continue;
+            };
+            let path = entry.path().join("run.json");
+            match read_run(&path).and_then(|run| {
+                validate_run_location(&path, run_id, &run)?;
+                Ok(run)
+            }) {
+                Ok(run) => inventory.runs.push(run),
+                Err(error) => inventory.problems.push(RunStoreProblem {
+                    path,
+                    message: error.to_string(),
+                }),
+            }
+        }
+        inventory.runs.sort_by(|left, right| {
+            right
+                .state
+                .is_active()
+                .cmp(&left.state.is_active())
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.run_id.cmp(&right.run_id))
+        });
+        inventory
+            .problems
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(inventory)
+    }
+
+    pub fn list_runs(&self) -> Result<Vec<RunRecord>, StoreError> {
+        let inventory = self.inspect_runs()?;
+        if let Some(problem) = inventory.problems.into_iter().next() {
+            return Err(StoreError::InvalidRunStore {
+                path: problem.path,
+                message: problem.message,
+            });
+        }
+        Ok(inventory.runs)
+    }
+
     pub fn operation_path(&self, operation_id: Uuid) -> PathBuf {
         self.root
             .join("operations")
             .join(format!("{operation_id}.json"))
+    }
+
+    pub fn run_directory(&self, run_id: Uuid) -> PathBuf {
+        self.root.join("runs").join(run_id.to_string())
     }
 
     fn claim_issue_directory(&self, issue: NonZeroU64) -> PathBuf {
@@ -300,6 +412,11 @@ impl Store {
 
     fn release_issue_directory(&self, issue: NonZeroU64) -> PathBuf {
         self.root.join("releases").join(issue.to_string())
+    }
+
+    fn claim_path(&self, issue: NonZeroU64, claim_id: Uuid) -> PathBuf {
+        self.claim_issue_directory(issue)
+            .join(format!("{claim_id}.json"))
     }
 }
 
@@ -314,6 +431,7 @@ impl LockedStore<'_> {
             self.store.root.join("operations"),
             self.store.root.join("claims"),
             self.store.root.join("releases"),
+            self.store.root.join("runs"),
         ] {
             create_directory(&directory)?;
         }
@@ -359,6 +477,147 @@ impl LockedStore<'_> {
                 source,
             }),
         }
+    }
+
+    pub fn create_run(&self, claim: &Claim, new_run: NewRun<'_>) -> Result<RunRecord, StoreError> {
+        claim.validate()?;
+        let claim_path = self.store.claim_path(claim.issue, claim.claim_id);
+        let persisted = match read_claim(&claim_path) {
+            Ok(claim) => claim,
+            Err(StoreError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::MissingClaimGeneration {
+                    issue: claim.issue,
+                    claim_id: claim.claim_id,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        if persisted != *claim {
+            return Err(StoreError::ClaimGenerationMismatch {
+                issue: claim.issue,
+                claim_id: claim.claim_id,
+            });
+        }
+
+        let run_directory = self.store.run_directory(new_run.run_id);
+        match fs::symlink_metadata(&run_directory) {
+            Ok(_) => {
+                return Err(StoreError::RunAlreadyExists {
+                    run_id: new_run.run_id,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(StoreError::Io {
+                    action: "inspect run destination",
+                    path: run_directory,
+                    source,
+                });
+            }
+        }
+        let mut operation = OperationRecord {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            operation_id: new_run.run_id,
+            kind: OperationKind::Run,
+            claim_id: claim.claim_id,
+            issue: claim.issue,
+            branch: claim.branch.clone(),
+            worktree: claim.worktree.clone(),
+            phase: OperationPhase::Reserved,
+            started_at: new_run.created_at,
+        };
+        operation.validate()?;
+        PreparedAtomicWrite::json(
+            &self.store.operation_path(operation.operation_id),
+            &operation,
+        )?
+        .create_new()?;
+
+        let result = self.create_run_artifacts(claim, new_run, &run_directory, &mut operation);
+        if result.is_err() {
+            let removed_run = match fs::remove_dir_all(&run_directory) {
+                Ok(()) => sync_directory(
+                    run_directory
+                        .parent()
+                        .expect("run directory always has a parent"),
+                )
+                .is_ok(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(_) => false,
+            };
+            if removed_run {
+                let _ = self.remove_operation(operation.operation_id);
+            }
+        }
+        result
+    }
+
+    fn create_run_artifacts(
+        &self,
+        claim: &Claim,
+        new_run: NewRun<'_>,
+        directory: &Path,
+        operation: &mut OperationRecord,
+    ) -> Result<RunRecord, StoreError> {
+        create_private_directory(directory)?;
+        let prompt_path = directory.join("prompt.md");
+        let stdout_path = directory.join("stdout.log");
+        let stderr_path = directory.join("stderr.log");
+        write_private_file(&prompt_path, new_run.prompt)?;
+        write_private_file(&stdout_path, b"")?;
+        write_private_file(&stderr_path, b"")?;
+        sync_directory(directory)?;
+
+        operation.phase = OperationPhase::RunArtifactsCreated;
+        self.write_operation(operation)?;
+        let run = RunRecord {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            run_id: new_run.run_id,
+            repo: claim.repo.clone(),
+            claim_id: claim.claim_id,
+            issue: claim.issue,
+            agent: new_run.agent.to_owned(),
+            mode: new_run.mode,
+            state: crate::model::RunState::Queued,
+            worktree: claim.worktree.clone(),
+            worker_pid: None,
+            child_pid: None,
+            created_at: new_run.created_at,
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            prompt_path,
+            stdout_path,
+            stderr_path,
+            error: None,
+        };
+        run.validate()?;
+        PreparedAtomicWrite::json(&directory.join("run.json"), &run)?.create_new()?;
+        operation.phase = OperationPhase::RunCommitted;
+        self.write_operation(operation)?;
+        self.remove_operation(operation.operation_id)?;
+        Ok(run)
+    }
+
+    pub fn transition_run(
+        &self,
+        run_id: Uuid,
+        transition: RunTransition,
+    ) -> Result<RunRecord, StoreError> {
+        let mut run = self
+            .store
+            .read_run(run_id)?
+            .ok_or(StoreError::RunNotFound { run_id })?;
+        let from = run.state;
+        run.apply_transition(transition)
+            .map_err(|error| StoreError::InvalidRunTransition {
+                run_id,
+                from: from.as_str(),
+                message: error.to_string(),
+            })?;
+        PreparedAtomicWrite::json(&self.store.run_directory(run_id).join("run.json"), &run)?
+            .replace()?;
+        Ok(run)
     }
 
     pub fn active_claims(&self) -> Result<Vec<Claim>, StoreError> {
@@ -458,6 +717,49 @@ fn create_directory(path: &Path) -> Result<(), StoreError> {
     })
 }
 
+fn create_private_directory(path: &Path) -> Result<(), StoreError> {
+    fs::create_dir(path).map_err(|source| StoreError::Io {
+        action: "create private run directory",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            StoreError::Io {
+                action: "set private run directory permissions",
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), StoreError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|source| StoreError::Io {
+        action: "create private run artifact",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.write_all(contents)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all())
+        .map_err(|source| StoreError::Io {
+            action: "write private run artifact",
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), StoreError> {
     File::open(path)
@@ -513,6 +815,55 @@ fn read_operation(path: &Path) -> Result<OperationRecord, StoreError> {
     OperationRecord::from_value(value).map_err(StoreError::Model)
 }
 
+fn read_run(path: &Path) -> Result<RunRecord, StoreError> {
+    let bytes = fs::read(path).map_err(|source| StoreError::Io {
+        action: "read run record",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|source| StoreError::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    RunRecord::from_value(value).map_err(StoreError::Model)
+}
+
+fn validate_run_location(path: &Path, run_id: Uuid, run: &RunRecord) -> Result<(), StoreError> {
+    if run.run_id != run_id {
+        return Err(StoreError::LocationMismatch {
+            path: path.to_path_buf(),
+            message: "run_id does not match its directory name".to_owned(),
+        });
+    }
+    let directory = path
+        .parent()
+        .expect("run record path always has a parent directory");
+    for (name, artifact) in [
+        ("prompt.md", &run.prompt_path),
+        ("stdout.log", &run.stdout_path),
+        ("stderr.log", &run.stderr_path),
+    ] {
+        if artifact != &directory.join(name) {
+            return Err(StoreError::LocationMismatch {
+                path: path.to_path_buf(),
+                message: format!("run artifact path for {name} does not match its run directory"),
+            });
+        }
+        let metadata = fs::symlink_metadata(artifact).map_err(|source| StoreError::Io {
+            action: "inspect run artifact",
+            path: artifact.to_path_buf(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(StoreError::LocationMismatch {
+                path: artifact.to_path_buf(),
+                message: format!("run artifact {name} is not a regular file"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_claim_location(
     path: &Path,
     issue: NonZeroU64,
@@ -566,4 +917,20 @@ pub enum StoreError {
     InvalidDestination(PathBuf),
     #[error("invalid store record location {path}: {message}")]
     LocationMismatch { path: PathBuf, message: String },
+    #[error("claim generation {claim_id} for issue {issue} does not exist")]
+    MissingClaimGeneration { issue: NonZeroU64, claim_id: Uuid },
+    #[error("claim generation {claim_id} for issue {issue} does not match persisted identity")]
+    ClaimGenerationMismatch { issue: NonZeroU64, claim_id: Uuid },
+    #[error("run {run_id} does not exist")]
+    RunNotFound { run_id: Uuid },
+    #[error("run {run_id} already exists")]
+    RunAlreadyExists { run_id: Uuid },
+    #[error("run {run_id} cannot transition from {from}: {message}")]
+    InvalidRunTransition {
+        run_id: Uuid,
+        from: &'static str,
+        message: String,
+    },
+    #[error("invalid run store state at {path}: {message}")]
+    InvalidRunStore { path: PathBuf, message: String },
 }

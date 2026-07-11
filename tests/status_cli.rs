@@ -140,6 +140,27 @@ fn status_outside_a_repository_is_an_operational_error() {
     assert_eq!(value["error"]["code"], "operational_error");
 }
 
+#[test]
+fn invalid_run_residue_is_reported_without_serializing_paths_or_contents() {
+    let fixture = RepositoryFixture::new();
+    let run_id = Uuid::parse_str("cccccccc-1111-4111-8111-111111111111").unwrap();
+    let run_directory = fixture.store().run_directory(run_id);
+    fs::create_dir_all(&run_directory).expect("create incomplete run directory");
+    fs::write(run_directory.join("prompt.md"), "private status token")
+        .expect("write private prompt");
+
+    let output = fixture.status(fixture.repository(), true);
+
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+    assert_eq!(value["status"], "warning");
+    assert_eq!(value["problems"][0]["code"], "invalid_run_store");
+    assert_eq!(value["problems"][0]["path"], "…/run.json");
+    let serialized = value.to_string();
+    assert!(!serialized.contains(fixture.root.path().to_str().unwrap()));
+    assert!(!serialized.contains("private status token"));
+}
+
 struct RepositoryFixture {
     root: TempDir,
     repository: PathBuf,

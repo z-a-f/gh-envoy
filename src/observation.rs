@@ -39,6 +39,7 @@ pub enum LocalProblemCode {
     MissingWorktree,
     WorktreeMismatch,
     AbandonedOperation,
+    InvalidRunStore,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -47,6 +48,8 @@ pub struct LocalProblem {
     pub issue: Option<NonZeroU64>,
     pub claim_id: Option<Uuid>,
     pub operation_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     pub message: String,
 }
 
@@ -67,7 +70,26 @@ pub fn observe_repository<R: CommandRunner>(
     let store = Store::new(repository.store_root());
     let claims = store.active_claims()?;
     let operations = store.list_operations()?;
-    observe_claim_set(runner, &repository, &config, claims, operations)
+    let run_inventory = store.inspect_runs()?;
+    let mut observation = observe_claim_set(runner, &repository, &config, claims, operations)?;
+    observation.problems.extend(
+        run_inventory
+            .problems
+            .into_iter()
+            .map(|problem| LocalProblem {
+                code: LocalProblemCode::InvalidRunStore,
+                issue: None,
+                claim_id: None,
+                operation_id: None,
+                path: Some(problem.path.clone()),
+                message: format!(
+                    "invalid run record at {}: {}",
+                    problem.path.display(),
+                    problem.message
+                ),
+            }),
+    );
+    Ok(observation)
 }
 
 pub fn observe_claims<R: CommandRunner>(
@@ -97,6 +119,7 @@ fn observe_claim_set<R: CommandRunner>(
             issue: Some(operation.issue),
             claim_id: Some(operation.claim_id),
             operation_id: Some(operation.operation_id),
+            path: None,
             message: format!(
                 "operation {} for issue {} was interrupted in phase {}",
                 operation.operation_id,
@@ -382,6 +405,7 @@ fn claim_problem(claim: &Claim, code: LocalProblemCode, message: String) -> Loca
         issue: Some(claim.issue),
         claim_id: Some(claim.claim_id),
         operation_id: None,
+        path: None,
         message,
     }
 }

@@ -85,6 +85,24 @@ fn release_and_every_operation_phase_are_representable() {
 }
 
 #[test]
+fn operation_journal_rejects_run_phases_for_claim_operations() {
+    let directory = TempDir::new().expect("temporary worktree");
+    let invalid = json!({
+        "schema_version": "0.1",
+        "operation_id": "2c9d1ce8-1a34-4a14-b55f-8260b02dccd0",
+        "kind": "claim",
+        "claim_id": "321ba92e-f076-4bc7-bd5b-6cc16cf76277",
+        "issue": 7,
+        "branch": "envoy/issue-7-321ba92e",
+        "worktree": directory.path(),
+        "phase": "run_artifacts_created",
+        "started_at": "2026-07-10T18:00:00Z"
+    });
+
+    assert!(OperationRecord::from_value(invalid).is_err());
+}
+
+#[test]
 fn marker_only_release_report_exposes_explicit_cleanup_state() {
     let claim_id = uuid::Uuid::new_v4();
     let report = ReleaseReport::marker_only(

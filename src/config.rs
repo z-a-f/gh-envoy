@@ -29,6 +29,7 @@ pub struct Config {
     pub default_base_ref: Option<String>,
     pub worktree_root: Option<PathBuf>,
     pub redact_paths_in_json: bool,
+    pub on_run_event: Option<Vec<String>>,
     pub risk_paths: BTreeMap<String, String>,
 }
 
@@ -39,6 +40,7 @@ impl Default for Config {
             default_base_ref: None,
             worktree_root: None,
             redact_paths_in_json: true,
+            on_run_event: None,
             risk_paths: DEFAULT_RISK_PATHS
                 .iter()
                 .map(|(glob, label)| ((*glob).to_owned(), (*label).to_owned()))
@@ -74,6 +76,9 @@ impl Config {
         }
         if let Some(value) = overlay.redact_paths_in_json {
             config.redact_paths_in_json = value;
+        }
+        if let Some(value) = overlay.on_run_event {
+            config.on_run_event = value;
         }
         if let Some(value) = overlay.risk_paths {
             config.risk_paths.extend(value);
@@ -119,6 +124,14 @@ impl Config {
                 message: "risk path globs and labels must not be empty".to_owned(),
             });
         }
+        if let Some(command) = &self.on_run_event
+            && (command.is_empty() || command[0].trim().is_empty())
+        {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message: "on_run_event must contain a non-empty executable".to_owned(),
+            });
+        }
         for glob in self.risk_paths.keys() {
             if let Err(error) = validate_glob_pattern(glob) {
                 return Err(ConfigError::Invalid {
@@ -138,6 +151,7 @@ struct ConfigOverlay {
     default_base_ref: Option<Option<String>>,
     worktree_root: Option<Option<PathBuf>>,
     redact_paths_in_json: Option<bool>,
+    on_run_event: Option<Option<Vec<String>>>,
     risk_paths: Option<BTreeMap<String, String>>,
 }
 

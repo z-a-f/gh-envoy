@@ -13,6 +13,7 @@ fn missing_config_uses_built_in_defaults() {
     assert_eq!(config.default_base_ref, None);
     assert_eq!(config.worktree_root, None);
     assert!(config.redact_paths_in_json);
+    assert_eq!(config.on_run_event, None);
     assert!(!config.risk_paths.is_empty());
     for label in [
         "lockfile",
@@ -34,7 +35,7 @@ fn common_directory_config_overlays_individual_defaults() {
     fs::write(
         store.join("config.yml"),
         format!(
-            "base_remote: upstream\ndefault_base_ref: trunk\nworktree_root: {}\nredact_paths_in_json: false\nrisk_paths:\n  Cargo.lock: lockfile\n",
+            "base_remote: upstream\ndefault_base_ref: trunk\nworktree_root: {}\nredact_paths_in_json: false\non_run_event: [openfind, envoy-event, '']\nrisk_paths:\n  Cargo.lock: lockfile\n",
             worktrees.display()
         ),
     )
@@ -46,6 +47,14 @@ fn common_directory_config_overlays_individual_defaults() {
     assert_eq!(config.default_base_ref.as_deref(), Some("trunk"));
     assert_eq!(config.worktree_root.as_deref(), Some(worktrees.as_path()));
     assert!(!config.redact_paths_in_json);
+    assert_eq!(
+        config.on_run_event,
+        Some(vec![
+            "openfind".to_owned(),
+            "envoy-event".to_owned(),
+            String::new(),
+        ])
+    );
     assert_eq!(config.risk_paths["Cargo.lock"], "lockfile");
     assert!(
         config.risk_paths.len() > 1,
@@ -81,6 +90,8 @@ fn config_rejects_invalid_overrides() {
         "risk_paths:\n  '': lockfile\n",
         "risk_paths:\n  Cargo.lock: ''\n",
         "risk_paths:\n  '[': invalid\n",
+        "on_run_event: []\n",
+        "on_run_event: ['  ']\n",
     ] {
         let common_dir = TempDir::new().expect("temporary common directory");
         let store = common_dir.path().join("envoy");

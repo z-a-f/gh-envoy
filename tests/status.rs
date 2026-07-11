@@ -174,6 +174,7 @@ fn fixture_report() -> StatusReport {
             issue: Some(issue(13)),
             claim_id: Some(second_id),
             operation_id: None,
+            path: None,
             message: "local branch \"envoy/issue-13\" does not resolve to a commit".to_owned(),
         }],
     }
