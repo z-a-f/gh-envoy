@@ -31,7 +31,7 @@ pub const SCHEMA_VERSION: &str = "0.1";
 #[derive(Debug, Parser)]
 #[command(
     name = "gh-envoy",
-    version,
+    version = env!("APP_VERSION"),
     about = "Coordinate parallel GitHub issue work across Git worktrees"
 )]
 pub struct Cli {

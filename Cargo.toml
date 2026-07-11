@@ -1,6 +1,5 @@
 [package]
 name = "gh-envoy"
-version = "0.1.3"
 edition = "2024"
 license = "MIT"
 description = "GitHub-native coordination verifier for parallel AI-assisted development"
@@ -27,5 +26,5 @@ unsafe_code = "forbid"
 
 [profile.ci-dev]
 inherits = "dev"
-debug = "line-tables-only"
+debug = 0
 incremental = false

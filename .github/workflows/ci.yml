@@ -34,21 +34,19 @@ jobs:
           - os: ubuntu-latest
             quality: true
             cache_scope: quality
-            components: clippy, rustfmt
           - os: macos-latest
             quality: false
             cache_scope: platform
-            components: ""
           - os: windows-latest
             quality: false
             cache_scope: platform
-            components: ""
 
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.quality
         with:
-          components: ${{ matrix.components }}
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-${{ matrix.cache_scope }}
@@ -61,10 +59,24 @@ jobs:
             --all-targets
             --all-features
             -- -D warnings
-      - run: cargo test
+      - name: Run test suite with Cargo
+        if: matrix.quality
+        run: cargo test
             --profile ci-dev
             --all-targets
             --locked
+      - name: Install cargo-nextest
+        if: matrix.quality == false
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Run test suite with nextest
+        if: matrix.quality == false
+        run: cargo nextest run
+            --cargo-profile ci-dev
+            --all-targets
+            --locked
+            --no-fail-fast
       - name: Smoke-test the extension entrypoint
         if: matrix.quality
         run: cargo run
