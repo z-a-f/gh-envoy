@@ -65,7 +65,7 @@ gh envoy claim 123
 gh envoy claim 123 --force
 ```
 
-The forced path emits a warning and records the observed title. `--force` does not bypass ownership, relationship, branch, worktree, or integrity checks. If GitHub cannot be reached or authenticated, Envoy continues with unverified local intent and a warning so offline work remains possible.
+The forced path emits a warning and records the observed title. `--force` does not bypass ownership, relationship, branch, worktree, or integrity checks. Reachable missing target and `--after` issues are refused before local mutation. If GitHub cannot be reached or authenticated, Envoy continues with unverified local intent and a warning so offline work remains possible.
 
 During development:
 
@@ -75,7 +75,7 @@ gh envoy status
 gh envoy doctor 123
 ```
 
-`list` is the full local history of active and released claim generations. `status` is the active repository coordination view. `doctor 123` is the focused pre-publish and pre-merge check. None of these commands mutate Git or Envoy state.
+`list` is the full local history of active and released claim generations. `status` is the active repository coordination view and enriches its derived output with read-only issue/title and exact-branch PR facts. `doctor 123` is the focused pre-publish and pre-merge check; a wrong stacked PR base blocks publish, while merged PRs and closed issues recommend idempotent release. None of these commands mutate Git, GitHub, claim files, or Envoy state.
 
 Human `list` and `status` output uses compact per-claim blocks and adds color when stdout is an interactive terminal. Piped output, redirected output, and JSON never contain color escapes. Set the standard `NO_COLOR` environment variable to disable color.
 
@@ -200,10 +200,10 @@ Envoy attempts to refresh the configured base remote for a fresh claim. If the r
 This makes local and offline dogfooding possible, but it changes what is known:
 
 - Local branch, worktree, diff, ownership, and dependency checks still run.
-- Claim observes issue title and open/closed state when GitHub is available; status and doctor do not yet refresh those facts or observe pull requests.
+- Claim observes issue title and open/closed state and validates reachable `--after` issues. Status and doctor refresh issue and exact-branch pull-request facts without persisting them.
 - An unverified fallback should be reviewed before publishing, especially after a long offline period.
 
-When the claim lookup is unavailable, do not interpret an accepted issue number as proof that the GitHub issue exists. Broader read-only GitHub observation remains a future option.
+When GitHub is unavailable, do not interpret an accepted issue number as proof that the GitHub issue exists. Status and doctor mark remote facts unavailable and continue running their local checks.
 
 ## Scenario 8: recover after interruption or drift
 
@@ -287,7 +287,7 @@ The following distinction matters during dogfooding:
 | Local status, overlap, scope, and integrity observation | Available now. |
 | Single-claim and exact-generation stack doctor | Available now. |
 | Marker-only, idempotent release | Available now. |
-| GitHub issue/title and PR-state observation | **Future option; not implemented.** It must remain read-only when introduced. |
+| GitHub issue/title and exact-branch PR-state observation | Available now and read-only. Derived titles never rewrite claims. |
 | `ship` for guarded push and PR creation | **Future option; not implemented.** Until then, publish manually after doctor. |
 | Whole-stack shipping, holds, dry runs, and PR readiness controls | **Future option; not implemented.** |
 | Release-time branch/worktree deletion flags | **Future option; not implemented.** Current release never deletes them. |

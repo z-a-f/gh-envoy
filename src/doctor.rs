@@ -13,6 +13,10 @@ use crate::config::{Config, ConfigError};
 use crate::conflict::{OverlapRelationship, OverlapSeverity, ScopeWarningReason};
 use crate::exit::EnvoyExitCode;
 use crate::git::{GitCli, RepositoryContext, RepositoryError};
+use crate::github::{
+    GithubIssueError, GithubIssueObservation, GithubIssueState, GithubPullRequestObservation,
+    GithubPullRequestState, observe_issue, observe_pull_request,
+};
 use crate::model::{Claim, SCHEMA_VERSION};
 use crate::observation::{
     LocalProblem, LocalProblemCode, ObservationError, observe_claims, observe_repository,
@@ -756,6 +760,16 @@ pub fn doctor_repository<R: CommandRunner>(
         let (coordination, coordination_recommendations) = coordination_checks(observed);
         checks.extend(coordination);
         recommendations.extend(coordination_recommendations);
+        if repository.is_github_remote() {
+            let (github_checks, github_recommendations) = github_checks_for_claim(
+                runner,
+                &repository.main_worktree,
+                &repository.repository,
+                claim,
+            )?;
+            checks.extend(github_checks);
+            recommendations.extend(github_recommendations);
+        }
     }
 
     let selected_operations = observation
@@ -877,6 +891,16 @@ pub fn doctor_stack<R: CommandRunner>(
             let (coordination, coordination_recommendations) = coordination_checks(&active_only);
             node_checks.extend(coordination);
             node_recommendations.extend(coordination_recommendations);
+            if repository.is_github_remote() {
+                let (github_checks, github_recommendations) = github_checks_for_claim(
+                    runner,
+                    &repository.main_worktree,
+                    &repository.repository,
+                    &node.claim,
+                )?;
+                node_checks.extend(github_checks);
+                node_recommendations.extend(github_recommendations);
+            }
         }
         if let Some(release) = &node.release {
             node_checks.push(
@@ -909,6 +933,139 @@ pub fn doctor_stack<R: CommandRunner>(
         Utc::now(),
     )
     .with_nodes(nodes))
+}
+
+fn github_checks_for_claim<R: CommandRunner>(
+    runner: &R,
+    cwd: &Path,
+    repository: &str,
+    claim: &Claim,
+) -> Result<(Vec<DoctorCheck>, Vec<String>), GithubIssueError> {
+    let issue = observe_issue(runner, cwd, repository, claim.issue)?;
+    let pull_request = observe_pull_request(runner, cwd, repository, &claim.branch)?;
+    let mut checks = Vec::new();
+    let mut recommendations = Vec::new();
+
+    match issue {
+        GithubIssueObservation::Available(issue) => {
+            let closed = issue.state == GithubIssueState::Closed;
+            checks.push(
+                DoctorCheck::new(
+                    "publish.issue_state",
+                    CheckGate::Publish,
+                    "GitHub issue",
+                    if closed {
+                        CheckStatus::Warn
+                    } else {
+                        CheckStatus::Pass
+                    },
+                    if closed {
+                        format!("GitHub issue #{} is closed", claim.issue)
+                    } else {
+                        format!("GitHub issue #{} is open", claim.issue)
+                    },
+                )
+                .with_evidence(json!({
+                    "issue": claim.issue,
+                    "title": issue.title,
+                    "state": if closed { "closed" } else { "open" },
+                })),
+            );
+            if closed {
+                recommendations.push(format!(
+                    "Release idempotently: gh envoy release {} --reason closed",
+                    claim.issue
+                ));
+            }
+        }
+        GithubIssueObservation::NotFound => checks.push(
+            DoctorCheck::new(
+                "publish.issue_state",
+                CheckGate::Publish,
+                "GitHub issue",
+                CheckStatus::Fail,
+                format!(
+                    "GitHub issue #{} does not exist or is not reachable in this repository",
+                    claim.issue
+                ),
+            )
+            .required(),
+        ),
+        GithubIssueObservation::Unavailable => checks.push(DoctorCheck::new(
+            "publish.issue_state",
+            CheckGate::Publish,
+            "GitHub issue",
+            CheckStatus::Skip,
+            "GitHub issue state is unavailable; local checks remain valid",
+        )),
+    }
+
+    match pull_request {
+        GithubPullRequestObservation::Available(Some(pr)) => {
+            let base_matches = pr.base == claim.base_ref;
+            checks.push(
+                DoctorCheck::new(
+                    "publish.pr_base",
+                    CheckGate::Publish,
+                    "Pull request base",
+                    if base_matches {
+                        CheckStatus::Pass
+                    } else {
+                        CheckStatus::Fail
+                    },
+                    if base_matches {
+                        format!(
+                            "pull request #{} targets expected base {:?}",
+                            pr.number, claim.base_ref
+                        )
+                    } else {
+                        format!(
+                            "pull request #{} targets {:?}, expected {:?}",
+                            pr.number, pr.base, claim.base_ref
+                        )
+                    },
+                )
+                .required()
+                .with_evidence(json!({
+                    "number": pr.number,
+                    "url": pr.url,
+                    "head": pr.head,
+                    "base": pr.base,
+                    "expected_base": claim.base_ref,
+                    "draft": pr.draft,
+                    "state": match pr.state {
+                        GithubPullRequestState::Open => "open",
+                        GithubPullRequestState::Closed => "closed",
+                        GithubPullRequestState::Merged => "merged",
+                    },
+                })),
+            );
+            if pr.state == GithubPullRequestState::Merged {
+                recommendations.push(format!(
+                    "Release idempotently: gh envoy release {} --reason merged",
+                    claim.issue
+                ));
+            }
+        }
+        GithubPullRequestObservation::Available(None) => checks.push(DoctorCheck::new(
+            "publish.pr_base",
+            CheckGate::Publish,
+            "Pull request base",
+            CheckStatus::Skip,
+            "no pull request exists for the exact claimed branch",
+        )),
+        GithubPullRequestObservation::Unavailable => checks.push(DoctorCheck::new(
+            "publish.pr_base",
+            CheckGate::Publish,
+            "Pull request base",
+            CheckStatus::Skip,
+            "pull request facts are unavailable; local checks remain valid",
+        )),
+    }
+
+    recommendations.sort();
+    recommendations.dedup();
+    Ok((checks, recommendations))
 }
 
 fn basic_claim_checks(
@@ -1462,4 +1619,6 @@ pub enum DoctorError {
     Store(#[from] crate::store::StoreError),
     #[error(transparent)]
     Observation(#[from] ObservationError),
+    #[error(transparent)]
+    Github(#[from] GithubIssueError),
 }

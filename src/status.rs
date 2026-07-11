@@ -10,6 +10,10 @@ use crate::command::CommandRunner;
 use crate::config::{Config, ConfigError};
 use crate::conflict::{DiffOverlap, OverlapRelationship, OverlapSeverity, ScopeWarning};
 use crate::git::{RepositoryContext, RepositoryError};
+use crate::github::{
+    GithubIssueError, GithubIssueObservation, GithubPullRequestObservation, GithubPullRequestState,
+    observe_issue, observe_pull_request,
+};
 use crate::model::{Claim, SCHEMA_VERSION};
 use crate::observation::{
     DiffSummary, LocalProblem, LocalProblemCode, ObservationError, observe_repository,
@@ -109,6 +113,7 @@ pub fn status_document(report: &StatusReport) -> StatusDocument<'_> {
 pub fn get_status<R: CommandRunner>(runner: &R, cwd: &Path) -> Result<StatusReport, StatusError> {
     let common_dir = RepositoryContext::discover_common_dir_with_runner(runner, cwd)?;
     let config = Config::load(&common_dir)?;
+    let repository = RepositoryContext::discover_with_runner(runner, cwd, &config.base_remote)?;
     let observation = observe_repository(runner, cwd)?;
     let replacements = observation
         .claims
@@ -123,22 +128,93 @@ pub fn get_status<R: CommandRunner>(runner: &R, cwd: &Path) -> Result<StatusRepo
     let claims = observation
         .claims
         .into_iter()
-        .map(|observed| {
+        .map(|observed| -> Result<ClaimStatus, StatusError> {
             let mut claim = observed.claim;
+            let mut pr = None;
+            let mut github_state = GithubState::Unverified;
+            let mut stack_warnings = Vec::new();
+            if repository.is_github_remote() {
+                let issue = observe_issue(
+                    runner,
+                    &repository.main_worktree,
+                    &repository.repository,
+                    claim.issue,
+                )?;
+                let pull_request = observe_pull_request(
+                    runner,
+                    &repository.main_worktree,
+                    &repository.repository,
+                    &claim.branch,
+                )?;
+                github_state = if matches!(&issue, GithubIssueObservation::Unavailable)
+                    || matches!(
+                        &pull_request,
+                        GithubPullRequestObservation::Unavailable
+                    )
+                {
+                    GithubState::Unavailable
+                } else {
+                    GithubState::Available
+                };
+                match issue {
+                    GithubIssueObservation::Available(issue) => {
+                        if claim.title.is_none() {
+                            claim.title = Some(issue.title);
+                        }
+                    }
+                    GithubIssueObservation::NotFound => stack_warnings.push(StackWarning {
+                        code: "github.issue_not_found".to_owned(),
+                        issue: claim.issue,
+                        related_issue: None,
+                        related_claim_id: None,
+                        message: format!(
+                            "GitHub issue #{} does not exist or is not reachable in this repository",
+                            claim.issue
+                        ),
+                    }),
+                    GithubIssueObservation::Unavailable => {}
+                }
+                if let GithubPullRequestObservation::Available(Some(observed_pr)) = pull_request {
+                    if observed_pr.base != claim.base_ref {
+                        stack_warnings.push(StackWarning {
+                            code: "github.pr_base_mismatch".to_owned(),
+                            issue: claim.issue,
+                            related_issue: claim.base_issue,
+                            related_claim_id: claim.base_claim_id,
+                            message: format!(
+                                "pull request #{} targets {:?}, expected {:?}",
+                                observed_pr.number, observed_pr.base, claim.base_ref
+                            ),
+                        });
+                    }
+                    pr = Some(PrSummary {
+                        number: observed_pr.number,
+                        url: observed_pr.url,
+                        head: observed_pr.head,
+                        base: observed_pr.base,
+                        state: match observed_pr.state {
+                            GithubPullRequestState::Open => PrState::Open,
+                            GithubPullRequestState::Closed => PrState::Closed,
+                            GithubPullRequestState::Merged => PrState::Merged,
+                        },
+                        draft: observed_pr.draft,
+                    });
+                }
+            }
             if config.redact_paths_in_json {
                 claim.worktree = PathBuf::from(shortened_worktree(&claim.worktree));
             }
-            ClaimStatus {
+            Ok(ClaimStatus {
                 claim,
-                pr: None,
-                github_state: GithubState::Unverified,
+                pr,
+                github_state,
                 diff: observed.diff.unwrap_or_default(),
                 overlaps: observed.overlaps,
                 scope_warnings: observed.scope_warnings,
-                stack_warnings: Vec::new(),
-            }
+                stack_warnings,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     let problems = observation
         .problems
         .into_iter()
@@ -423,4 +499,6 @@ pub enum StatusError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Observation(#[from] ObservationError),
+    #[error(transparent)]
+    Github(#[from] GithubIssueError),
 }

@@ -453,6 +453,37 @@ fn github_open_and_unavailable_issue_observation_remain_claimable() {
 }
 
 #[test]
+fn reachable_missing_wait_for_issue_is_refused_before_local_mutation() {
+    let fixture = RepositoryFixture::with_remote();
+    fixture.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/z-a-f/fixture.git",
+    ]);
+    let runner = SelectiveGithubIssueRunner;
+
+    let error = claim_issue_with_options(
+        &runner,
+        fixture.repository(),
+        std::num::NonZeroU64::new(113).unwrap(),
+        ClaimOptions {
+            after: vec![std::num::NonZeroU64::new(115).unwrap()],
+            ..ClaimOptions::default()
+        },
+    )
+    .expect_err("missing wait_for issue is refused");
+
+    assert!(error.to_string().contains("wait_for GitHub issue 115"));
+    assert!(!fixture.store_root().exists());
+    assert!(
+        fixture
+            .git_stdout(&["branch", "--list", "envoy/issue-113-*"])
+            .is_empty()
+    );
+}
+
+#[test]
 fn concurrent_claims_produce_one_winner_without_git_leaks() {
     let fixture = RepositoryFixture::with_remote();
     let first = spawn_envoy(fixture.repository(), &["claim", "55", "--json"]);
@@ -770,6 +801,37 @@ struct FailCanonicalizationOnceRunner {
 struct GithubIssueRunner {
     gh_output: CommandOutput,
     gh_calls: Mutex<Vec<CommandSpec>>,
+}
+
+struct SelectiveGithubIssueRunner;
+
+impl CommandRunner for SelectiveGithubIssueRunner {
+    fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, RunnerError> {
+        if spec.program == "gh" {
+            let missing = spec.args.iter().any(|arg| arg == "115");
+            return Ok(CommandOutput {
+                exit_code: Some(if missing { 1 } else { 0 }),
+                stdout: if missing {
+                    Vec::new()
+                } else {
+                    br#"{"state":"OPEN","title":"Ready"}"#.to_vec()
+                },
+                stderr: if missing {
+                    b"could not resolve to an issue with the number of 115".to_vec()
+                } else {
+                    Vec::new()
+                },
+            });
+        }
+        if spec.program == "git" && spec.args.first().is_some_and(|arg| arg == "fetch") {
+            return Ok(CommandOutput {
+                exit_code: Some(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
+        SystemRunner.run(spec)
+    }
 }
 
 impl GithubIssueRunner {
