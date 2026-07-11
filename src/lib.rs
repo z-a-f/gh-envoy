@@ -11,6 +11,7 @@ pub mod lifecycle;
 pub mod list;
 pub mod model;
 pub mod observation;
+pub mod run;
 pub mod stack;
 pub mod status;
 pub mod store;

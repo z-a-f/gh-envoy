@@ -104,6 +104,7 @@ pub struct RepositoryContext {
     pub remote_name: String,
     pub remote_url: String,
     pub current_worktree: PathBuf,
+    pub current_branch: Option<String>,
     pub main_worktree: PathBuf,
     pub common_dir: PathBuf,
 }
@@ -150,6 +151,26 @@ impl RepositoryContext {
                 )
             })?;
         let main_worktree = canonical_existing(PathBuf::from(main_worktree))?;
+        let current_branch = worktrees_text
+            .split("\n\n")
+            .find_map(|entry| {
+                let mut path = None;
+                let mut branch = None;
+                for line in entry.lines() {
+                    if let Some(value) = line.strip_prefix("worktree ") {
+                        path = Some(PathBuf::from(value));
+                    } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                        branch = Some(value.to_owned());
+                    }
+                }
+                path.and_then(|path| {
+                    canonical_existing(path)
+                        .ok()
+                        .filter(|path| path == &current_worktree)
+                        .map(|_| branch)
+                })
+            })
+            .flatten();
 
         let (remote_url, repository) = match git.run(cwd, ["remote", "get-url", remote_name]) {
             Ok(remote_output) => {
@@ -182,6 +203,7 @@ impl RepositoryContext {
             remote_name: remote_name.to_owned(),
             remote_url,
             current_worktree,
+            current_branch,
             main_worktree,
             common_dir,
         })
@@ -279,6 +301,16 @@ pub enum RepositoryError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl RepositoryError {
+    pub fn is_outside_worktree(&self) -> bool {
+        matches!(
+            self,
+            Self::Command(CliCommandError::Failed { command, .. })
+                if command == "git rev-parse --show-toplevel"
+        )
+    }
 }
 
 #[cfg(test)]
