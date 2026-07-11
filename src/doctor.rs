@@ -158,6 +158,35 @@ pub struct GateRollups {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DoctorNodeReport {
+    pub issue: NonZeroU64,
+    pub claim_id: Uuid,
+    pub status: GateRollup,
+    pub gates: GateRollups,
+    pub checks: Vec<DoctorCheck>,
+    pub recommendations: Vec<String>,
+}
+
+impl DoctorNodeReport {
+    pub fn new(
+        issue: NonZeroU64,
+        claim_id: Uuid,
+        checks: Vec<DoctorCheck>,
+        recommendations: Vec<String>,
+    ) -> Self {
+        let gates = rollups(&checks);
+        Self {
+            issue,
+            claim_id,
+            status: worst_gate(gates),
+            gates,
+            checks,
+            recommendations,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DoctorReport {
     pub subject: DoctorSubject,
     pub status: GateRollup,
@@ -165,6 +194,8 @@ pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
     pub recommendations: Vec<String>,
     pub generated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<DoctorNodeReport>,
 }
 
 impl DoctorReport {
@@ -174,15 +205,8 @@ impl DoctorReport {
         recommendations: Vec<String>,
         generated_at: DateTime<Utc>,
     ) -> Self {
-        let gates = GateRollups {
-            integrity: rollup_gate_for(&checks, CheckGate::Integrity),
-            publish: rollup_gate_for(&checks, CheckGate::Publish),
-            merge: rollup_gate_for(&checks, CheckGate::Merge),
-        };
-        let status = [gates.integrity, gates.publish, gates.merge]
-            .into_iter()
-            .max_by_key(|rollup| rollup.severity())
-            .unwrap_or(GateRollup::Ok);
+        let gates = rollups(&checks);
+        let status = worst_gate(gates);
         Self {
             subject,
             status,
@@ -190,12 +214,43 @@ impl DoctorReport {
             checks,
             recommendations,
             generated_at,
+            nodes: Vec::new(),
         }
+    }
+
+    pub fn with_nodes(mut self, nodes: Vec<DoctorNodeReport>) -> Self {
+        let mut checks = self.checks.clone();
+        for node in &nodes {
+            checks.extend(node.checks.iter().cloned());
+            self.recommendations
+                .extend(node.recommendations.iter().cloned());
+        }
+        self.recommendations.sort();
+        self.recommendations.dedup();
+        self.gates = rollups(&checks);
+        self.status = worst_gate(self.gates);
+        self.nodes = nodes;
+        self
     }
 
     pub fn exit_code(&self) -> EnvoyExitCode {
         self.status.exit_code()
     }
+}
+
+fn rollups(checks: &[DoctorCheck]) -> GateRollups {
+    GateRollups {
+        integrity: rollup_gate_for(checks, CheckGate::Integrity),
+        publish: rollup_gate_for(checks, CheckGate::Publish),
+        merge: rollup_gate_for(checks, CheckGate::Merge),
+    }
+}
+
+fn worst_gate(gates: GateRollups) -> GateRollup {
+    [gates.integrity, gates.publish, gates.merge]
+        .into_iter()
+        .max_by_key(|rollup| rollup.severity())
+        .unwrap_or(GateRollup::Ok)
 }
 
 pub fn rollup_gate(checks: &[DoctorCheck]) -> GateRollup {

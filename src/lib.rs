@@ -8,5 +8,6 @@ pub mod git;
 pub mod lifecycle;
 pub mod model;
 pub mod observation;
+pub mod stack;
 pub mod status;
 pub mod store;
