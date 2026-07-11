@@ -1,0 +1,23 @@
+[
+  {
+    "agent": "codex",
+    "child_pid": null,
+    "claim_id": "321ba92e-f076-4bc7-bd5b-6cc16cf76277",
+    "created_at": "2026-07-11T18:00:00Z",
+    "error": null,
+    "exit_code": null,
+    "finished_at": null,
+    "issue": 24,
+    "mode": "background",
+    "prompt_path": "/common/envoy/runs/22222222-2222-4222-8222-222222222222/prompt.md",
+    "repo": "z-a-f/fixture",
+    "run_id": "22222222-2222-4222-8222-222222222222",
+    "schema_version": "0.1",
+    "started_at": null,
+    "state": "queued",
+    "stderr_path": "/common/envoy/runs/22222222-2222-4222-8222-222222222222/stderr.log",
+    "stdout_path": "/common/envoy/runs/22222222-2222-4222-8222-222222222222/stdout.log",
+    "worker_pid": null,
+    "worktree": "/worktrees/issue-24"
+  }
+]
