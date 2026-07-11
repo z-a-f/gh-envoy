@@ -67,6 +67,22 @@ cargo test --all-targets --locked
 
 Tests use temporary repositories and fake GitHub command runners. They do not require GitHub credentials or network access after Cargo dependencies are available.
 
+## Releasing
+
+Push a version tag to build and publish precompiled binaries via `.github/workflows/release.yml`:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Use plain, hyphen-free semver tags (`v0.1.0`, not `v0.1.0-alpha.1`). `gh-extension-precompile` marks any tag containing a hyphen as a prerelease, and `gh extension install <owner>/gh-envoy` only detects binary assets from the repository's **latest non-prerelease** release. If only prereleases exist, `gh` falls back to cloning the repo and running the root `gh-envoy` script, which requires Rust on the user's machine. If you must publish a prerelease and still want it installable, mark it as the latest release explicitly:
+
+```sh
+gh release edit <tag> --prerelease=false
+gh api -X PATCH repos/<owner>/gh-envoy/releases/<id> -f make_latest=true
+```
+
 ## CLI
 
 Install locally as a gh extension, or build the entrypoint directly:

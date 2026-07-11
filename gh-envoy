@@ -4,11 +4,19 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 
-bin="${CARGO_TARGET_DIR:-$root/target}/release/gh-envoy"
-if [[ ! -f "$bin" ]]; then
-  bin="${bin}.exe"
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "gh-envoy: cargo is required to run this local extension build." >&2
+  echo "Install Rust (https://rustup.rs) or install a released build with:" >&2
+  echo "  gh extension install z-a-f/gh-envoy" >&2
+  exit 1
 fi
 
 cargo build --release --locked --quiet >&2
+
+target_dir="${CARGO_TARGET_DIR:-$root/target}"
+bin="$target_dir/release/gh-envoy"
+if [[ ! -x "$bin" && -x "${bin}.exe" ]]; then
+  bin="${bin}.exe"
+fi
 
 exec "$bin" "$@"
