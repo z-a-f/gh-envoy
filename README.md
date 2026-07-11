@@ -4,6 +4,46 @@ Envoy is a GitHub-native coordination verifier for parallel AI-assisted developm
 
 The project builds a single `gh-envoy` binary. Git remains the source of truth: Envoy invokes the Git CLI through a typed process boundary and does not use `libgit2`.
 
+## Start here: dogfooding Envoy
+
+Envoy is useful when several people or coding agents need to work on different GitHub issues in the same repository without silently sharing branches or worktrees. An issue claim records declared exclusive ownership of one branch and one worktree. It is a coordination contract, not a filesystem or process lock: Envoy detects unsafe states and reports them, while people and agents still perform the development work.
+
+Build the binary, put it on `PATH`, and confirm that GitHub CLI can discover it as an extension:
+
+```sh
+cargo build --release --locked
+export PATH="$PWD/target/release:$PATH"
+gh envoy --help
+```
+
+You can also invoke `target/release/gh-envoy` directly. On Windows, add `target\release` to `PATH` using your normal shell or system settings.
+
+The basic dogfooding loop is:
+
+1. From any worktree in the target repository, claim an issue with `gh envoy claim 123`.
+2. Change into the worktree printed by the command and start the human or agent doing issue 123 there.
+3. Repeat for other independent issues. Each claim receives its own branch and worktree.
+4. Use `gh envoy status` while work is active to find ownership, overlap, scope, and integrity concerns.
+5. Before publishing or integrating work, run `gh envoy doctor 123`, or `gh envoy doctor --stack 123` for stacked work.
+6. Push, open the pull request, review, and merge with your existing tools. Envoy v0.1 does not write to GitHub.
+7. Mark the local claim complete with `gh envoy release 123 --reason merged`. Release preserves the branch and worktree.
+
+Choose the claim form that matches the work:
+
+| Scenario | Command | When to use it |
+| --- | --- | --- |
+| New independent work | `gh envoy claim 123` | Create an isolated branch and worktree from the selected base. |
+| Existing branch | `gh envoy claim 123 --branch issue-123` | Adopt a local branch without resetting it. |
+| Existing worktree | `gh envoy claim 123 --worktree ../issue-123` | Adopt an already registered Git worktree. |
+| Stacked change | `gh envoy claim 124 --onto 123` | Record that issue 124 is based on the exact active generation of issue 123. |
+| Consolidation work | `gh envoy claim 130 --after 123 --after 124` | Record that issue 130 should wait for several issue generations. |
+| Bounded ownership | `gh envoy claim 131 --scope 'src/**' --disallow '.github/workflows/**'` | Declare expected and prohibited paths so status and doctor can flag drift. |
+| Automation | `gh envoy status --json` | Consume stable machine-readable output and exit codes. |
+
+Current commands are deliberately local and read-only with respect to GitHub. Issue-title and pull-request observation, guarded push/PR creation, stack shipping, and optional release cleanup are **future options and are not implemented yet**. Agent launching, automatic rebasing/restacking, merging, retargeting, and force-pushing are outside the current command set; keep those steps explicit and human-controlled.
+
+See the [dogfooding guide](docs/dogfooding.md) for complete workflows, stack and dependency behavior, safety gates, configuration, JSON use, and troubleshooting. The [docs index](docs/README.md) separates operator guidance from the normative [product specification](spec.md).
+
 ## Development
 
 Install the stable Rust toolchain, then run:

@@ -2,7 +2,17 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    paths: &test_paths
+      - .github/workflows/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - tests/**
+      - src/**
+
   pull_request:
+    paths: *test_paths
 
 permissions:
   contents: read
